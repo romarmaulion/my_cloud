@@ -22,7 +22,7 @@ SOURCES = [
 ]
 
 ALLOWED_REGIONS = {"HK", "JP", "SG", "TW", "US"}
-TOP_N = 10
+TOP_N = 5
 CHECK_API = "https://api.090227.xyz/check"
 
 # 从 GitHub Secrets 获取环境变量

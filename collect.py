@@ -10,7 +10,7 @@ import dns.resolver
 SOURCES = [
     "https://zip.cm.edu.kg/all.txt",               # 远程文本列表
     "ProxyIP.HK.CMLiussss.net",                    # 域名
-    "https://sub.xinyitang.dpdns.org/sub?host=..." # 替换成你真实的订阅链接
+    "https://sub.xinyitang.dpdns.org/sub?host=gmail-auto.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=/" # 替换成你真实的订阅链接
 ]
 # ===========================================
 

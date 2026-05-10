@@ -4,7 +4,9 @@ import json
 import re
 import socket
 import dns.resolver
+import time
 from concurrent.futures import ThreadPoolExecutor
+from collections import defaultdict
 
 # ================= 配置区域 =================
 SOURCES = [
@@ -15,49 +17,66 @@ SOURCES = [
     "https://sub.xinyitang.dpdns.org/sub?host=gmail-auto.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=%2F" ,
     "https://sub.cmliussss.net/sub?host=gmail-auto.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=%2F" ,
     "https://owo.o00o.ooo/sub?host=gmail-auto.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=%2F" ,
-     "https://cm.soso.edu.kg/sub?host=gmail-auto.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=%2F" 
+    "https://cm.soso.edu.kg/sub?host=gmail-auto.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=%2F" 
 ]
 
 # 允许的地区
 ALLOWED_OTHER = {"HK", "JP", "SG", "TW", "US"}
-# 域名解析强制地区
-DOMAIN_DEFAULT_TAG = "HK"
+# 每个国家保留的前 10 名
+TOP_N = 10
 
-# API 查询配置
+# API 和 测速配置
 CHECK_API = "https://api.090227.xyz/check"
-MAX_WORKERS = 10  # API 并发查询线程数
+MAX_WORKERS_API = 10    # API 查询并发
+MAX_WORKERS_PING = 20   # TCP 测速并发
+TCP_TIMEOUT = 2         # TCP 超时时间（秒）
 # ===========================================
 
 def extract_country_from_label(label):
-    """从本地备注中提取国家代码"""
     label = label.upper()
     emoji_chars = [c for c in label if '\U0001F1E6' <= c <= '\U0001F1FF']
     if len(emoji_chars) >= 2:
         first, second = ord(emoji_chars[0]) - 0x1F1E6, ord(emoji_chars[1]) - 0x1F1E6
         return chr(first + ord('A')) + chr(second + ord('A'))
-    
-    cn_map = {
-        "香港": "HK", "HK": "HK", "HONG KONG": "HK",
-        "日本": "JP", "JP": "JP", "JAPAN": "JP",
-        "新加坡": "SG", "SG": "SG", "SINGAPORE": "SG",
-        "台湾": "TW", "TW": "TW", "TAIWAN": "TW",
-        "美国": "US", "US": "US", "UNITED STATES": "US"
-    }
+    cn_map = {"香港": "HK", "日本": "JP", "新加坡": "SG", "台湾": "TW", "美国": "US"}
     for name, code in cn_map.items():
         if name in label: return code
     return "UN"
 
 def fetch_country_from_api(ip):
-    """通过备选 API 查询 IP 归属地"""
     try:
-        # 接口通常需要 ip:port 格式，默认用 443
-        params = {"proxyip": f"{ip}:443"}
-        resp = requests.get(CHECK_API, params=params, timeout=8).json()
-        # 根据该 API 结构提取国家代码
-        country = resp.get("probe_results", {}).get("ipv4", {}).get("exit", {}).get("country", "UN")
-        return country.upper()
+        resp = requests.get(CHECK_API, params={"proxyip": f"{ip}:443"}, timeout=5).json()
+        return resp.get("probe_results", {}).get("ipv4", {}).get("exit", {}).get("country", "UN").upper()
+    except: return "UN"
+
+def tcp_ping(ip, port=443):
+    """测试 TCP 延迟"""
+    start = time.time()
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(TCP_TIMEOUT)
+        sock.connect((ip, port))
+        sock.close()
+        return int((time.time() - start) * 1000)
     except:
-        return "UN"
+        return 99999 # 连接失败设为极大值
+
+def process_api_and_ping(ip_list):
+    """并发查询 API 和 测速"""
+    results = {} # ip -> (tag, latency)
+    
+    def task(ip):
+        tag = fetch_country_from_api(ip)
+        latency = tcp_ping(ip) if tag in ALLOWED_OTHER else 99999
+        return ip, tag, latency
+
+    print(f"    [i] 正在处理 {len(ip_list)} 个待识别/待测速 IP...")
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS_PING) as executor:
+        futures = [executor.submit(task, ip) for ip in ip_list]
+        for f in futures:
+            ip, tag, lat = f.result()
+            results[ip] = (tag, lat)
+    return results
 
 def get_content(url):
     try:
@@ -66,38 +85,24 @@ def get_content(url):
         return resp.text if resp.status_code == 200 else None
     except: return None
 
-def process_un_ips(un_ip_list):
-    """并发处理未知地区的 IP"""
-    results = {}
-    if not un_ip_list: return results
-    
-    print(f"    [i] 正在通过 API 查询 {len(un_ip_list)} 个未知地区的 IP...")
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_ip = {executor.submit(fetch_country_from_api, ip): ip for ip in un_ip_list}
-        for future in future_to_ip:
-            ip = future_to_ip[future]
-            tag = future.result()
-            results[ip] = tag
-    return results
-
 def main():
-    domain_ips = set()
-    raw_other_data = [] # 格式: (ip, tag)
+    all_raw_ips = set() # 格式: (ip, initial_tag)
+    domain_results = [] # 格式: (ip, latency)
 
     for src in SOURCES:
         print(f"[*] 正在处理源: {src}")
-        
         # 1. 域名解析
         if not src.startswith("http"):
             try:
-                answers = dns.resolver.resolve(src, 'A')
-                for rdata in answers:
-                    domain_ips.add(f"{rdata.address}#{DOMAIN_DEFAULT_TAG}")
-                    print(f"    [+] 域名解析发现 IP: {rdata.address}")
+                ips = [rdata.address for rdata in dns.resolver.resolve(src, 'A')]
+                with ThreadPoolExecutor(max_workers=MAX_WORKERS_PING) as executor:
+                    pings = list(executor.map(tcp_ping, ips))
+                for ip, lat in zip(ips, pings):
+                    if lat < 99999: domain_results.append((f"{ip}#HK", lat))
             except: pass
             continue
 
-        # 2. URL 解析
+        # 2. URL 内容获取
         content = get_content(src)
         if not content: continue
         try:
@@ -119,33 +124,46 @@ def main():
             else:
                 match = re.search(r'(\d+\.\d+\.\d+\.\d+)', line)
                 if match:
-                    addr = match.group(1)
-                    tag = extract_country_from_label(line.split("#")[-1] if "#" in line else "UN")
+                    addr, tag = match.group(1), extract_country_from_label(line.split("#")[-1] if "#" in line else "UN")
             
             if addr and re.match(r'^\d+\.\d+\.\d+\.\d+$', addr):
-                raw_other_data.append((addr, tag))
+                all_raw_ips.add((addr, tag))
 
-    # --- 处理未知地区 (API 备选方案) ---
-    un_ips = [ip for ip, tag in raw_other_data if tag == "UN"]
-    api_results = process_un_ips(un_ips)
+    # --- 统一处理测速和 API 查询 ---
+    print(f"[*] 开始进行全球 API 归属地校对与 TCP 测速...")
+    ip_to_test = [ip for ip, tag in all_raw_ips]
+    # 如果本地能识别出国家且不是 UN，我们也测速，但如果识别不出，API 辅助
+    processed_data = process_api_and_ping(ip_to_test)
 
-    # --- 最终汇总与过滤 ---
-    final_other_ips = set()
-    for ip, tag in raw_other_data:
-        # 如果本地没认出来，看 API 的结果
-        final_tag = tag if tag != "UN" else api_results.get(ip, "UN")
-        if final_tag in ALLOWED_OTHER:
-            final_other_ips.add(f"{ip}#{final_tag}")
+    # --- 分组与排序 ---
+    country_groups = defaultdict(list)
+    for ip, initial_tag in all_raw_ips:
+        api_tag, latency = processed_data.get(ip, ("UN", 99999))
+        # 优先使用 API 识别出的国家，因为更准
+        final_tag = api_tag if api_tag != "UN" else initial_tag
+        
+        if final_tag in ALLOWED_OTHER and latency < 99999:
+            country_groups[final_tag].append((f"{ip}#{final_tag}", latency))
 
-    # 保存
+    # --- 筛选 Top 10 ---
+    final_other_ips = []
+    for country in ALLOWED_OTHER:
+        # 按延迟排序
+        sorted_list = sorted(country_groups[country], key=lambda x: x[1])
+        top_10 = sorted_list[:TOP_N]
+        final_other_ips.extend([item[0] for item in top_10])
+        print(f"    [+] {country}: 筛选出 {len(top_10)} 个优质节点")
+
+    # 域名解析结果也取前 10
+    domain_top_10 = [item[0] for item in sorted(domain_results, key=lambda x: x[1])[:TOP_N]]
+
+    # 保存文件
     with open("domain_ips.txt", "w", encoding="utf-8") as f:
-        f.write("\n".join(sorted(list(domain_ips))))
+        f.write("\n".join(domain_top_10))
     with open("other_ips.txt", "w", encoding="utf-8") as f:
-        f.write("\n".join(sorted(list(final_other_ips))))
+        f.write("\n".join(final_other_ips))
 
-    print(f"\n[任务完成]")
-    print(f"域名解析(锁定HK): {len(domain_ips)} 个")
-    print(f"其他(API辅助+地区过滤): {len(final_other_ips)} 个")
+    print(f"\n[任务完成] 域名 Top10 已保存, 其他各国家 Top10 已保存。")
 
 if __name__ == "__main__":
     main()

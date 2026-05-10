@@ -5,6 +5,7 @@ import re
 import socket
 import dns.resolver
 import time
+import os
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 
@@ -20,19 +21,17 @@ SOURCES = [
     "https://cm.soso.edu.kg/sub?host=gmail-auto.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=%2F" 
 ]
 
-# 允许的地区
-ALLOWED_OTHER = {"HK", "JP", "SG", "TW", "US"}
-# 每个国家保留的前 10 名
+ALLOWED_REGIONS = {"HK", "JP", "SG", "TW", "US"}
 TOP_N = 10
-
-# API 和 测速配置
 CHECK_API = "https://api.090227.xyz/check"
-MAX_WORKERS_API = 10    # API 查询并发
-MAX_WORKERS_PING = 20   # TCP 测速并发
-TCP_TIMEOUT = 2         # TCP 超时时间（秒）
+
+# 从 GitHub Secrets 获取环境变量
+CF_API_TOKEN = os.getenv("CF_API_TOKEN")
+CF_ZONE_ID = os.getenv("CF_ZONE_ID")
+CF_RECORD_NAME = os.getenv("CF_RECORD_NAME")
 # ===========================================
 
-def extract_country_from_label(label):
+def extract_country_local(label):
     label = label.upper()
     emoji_chars = [c for c in label if '\U0001F1E6' <= c <= '\U0001F1FF']
     if len(emoji_chars) >= 2:
@@ -43,127 +42,126 @@ def extract_country_from_label(label):
         if name in label: return code
     return "UN"
 
-def fetch_country_from_api(ip):
+def check_availability_and_get_region(ip):
+    """调用 API 验证可用性并获取真实地区"""
     try:
-        resp = requests.get(CHECK_API, params={"proxyip": f"{ip}:443"}, timeout=5).json()
-        return resp.get("probe_results", {}).get("ipv4", {}).get("exit", {}).get("country", "UN").upper()
-    except: return "UN"
+        resp = requests.get(CHECK_API, params={"proxyip": f"{ip}:443"}, timeout=10).json()
+        if resp.get("success") is True:
+            # 提取 API 识别的国家
+            region = resp.get("probe_results", {}).get("ipv4", {}).get("exit", {}).get("country", "UN").upper()
+            return True, region
+    except: pass
+    return False, "UN"
 
-def tcp_ping(ip, port=443):
-    """测试 TCP 延迟"""
+def tcp_ping(ip):
+    """测试 TCP 443 延迟"""
     start = time.time()
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(TCP_TIMEOUT)
-        sock.connect((ip, port))
+        sock.settimeout(2)
+        sock.connect((ip, 443))
         sock.close()
         return int((time.time() - start) * 1000)
-    except:
-        return 99999 # 连接失败设为极大值
+    except: return 99999
 
-def process_api_and_ping(ip_list):
-    """并发查询 API 和 测速"""
-    results = {} # ip -> (tag, latency)
-    
-    def task(ip):
-        tag = fetch_country_from_api(ip)
-        latency = tcp_ping(ip) if tag in ALLOWED_OTHER else 99999
-        return ip, tag, latency
+def update_cloudflare_dns(ips):
+    """更新 Cloudflare DNS 记录 (批量覆盖)"""
+    if not CF_API_TOKEN or not CF_ZONE_ID or not CF_RECORD_NAME:
+        print("[!] 缺失 Cloudflare 环境变量，跳过 DNS 更新。")
+        return
 
-    print(f"    [i] 正在处理 {len(ip_list)} 个待识别/待测速 IP...")
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS_PING) as executor:
-        futures = [executor.submit(task, ip) for ip in ip_list]
-        for f in futures:
-            ip, tag, lat = f.result()
-            results[ip] = (tag, lat)
-    return results
+    headers = {"Authorization": f"Bearer {CF_API_TOKEN}", "Content-Type": "application/json"}
+    url = f"https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records"
 
-def get_content(url):
     try:
-        headers = {'User-Agent': 'v2rayNG/1.8.5'}
-        resp = requests.get(url, headers=headers, timeout=15)
-        return resp.text if resp.status_code == 200 else None
-    except: return None
+        # 1. 获取现有记录 ID
+        existing = requests.get(url, headers=headers, params={"name": CF_RECORD_NAME}).json()
+        for rec in existing.get("result", []):
+            requests.delete(f"{url}/{rec['id']}", headers=headers)
+        
+        # 2. 批量添加新记录
+        for ip in ips:
+            data = {"type": "A", "name": CF_RECORD_NAME, "content": ip, "ttl": 60, "proxied": False}
+            requests.post(url, headers=headers, json=data)
+        print(f"[+] 成功更新 {len(ips)} 个 IP 到 Cloudflare DNS: {CF_RECORD_NAME}")
+    except Exception as e:
+        print(f"[!] 更新 Cloudflare DNS 失败: {e}")
+
+def process_node(ip, initial_tag):
+    """单个节点的处理流程：可用性核验 -> 地区过滤 -> 测速"""
+    is_ok, real_region = check_availability_and_get_region(ip)
+    tag = real_region if real_region != "UN" else initial_tag
+    
+    if is_ok and tag in ALLOWED_REGIONS:
+        latency = tcp_ping(ip)
+        if latency < 2000:
+            return {"ip": ip, "tag": tag, "latency": latency}
+    return None
 
 def main():
-    all_raw_ips = set() # 格式: (ip, initial_tag)
-    domain_results = [] # 格式: (ip, latency)
+    raw_ips = set() # (ip, initial_tag)
+    domain_ips = set()
 
+    # 1. 解析所有源
     for src in SOURCES:
-        print(f"[*] 正在处理源: {src}")
-        # 1. 域名解析
-        if not src.startswith("http"):
+        if src.startswith("http"):
+            headers = {'User-Agent': 'v2rayNG/1.8.5'}
             try:
-                ips = [rdata.address for rdata in dns.resolver.resolve(src, 'A')]
-                with ThreadPoolExecutor(max_workers=MAX_WORKERS_PING) as executor:
-                    pings = list(executor.map(tcp_ping, ips))
-                for ip, lat in zip(ips, pings):
-                    if lat < 99999: domain_results.append((f"{ip}#HK", lat))
+                content = requests.get(src, headers=headers, timeout=15).text
+                try: decoded = base64.b64decode(content + '=' * (-len(content) % 4)).decode('utf-8')
+                except: decoded = content
+                for line in decoded.splitlines():
+                    addr, tag = "", "UN"
+                    if "vmess://" in line:
+                        v2 = json.loads(base64.b64decode(line[8:]).decode('utf-8'))
+                        addr, tag = v2.get("add"), extract_country_local(v2.get("ps", ""))
+                    elif "@" in line:
+                        match = re.search(r'@(.*?)(?::|/|\?|#)', line)
+                        if match: addr, tag = match.group(1), extract_country_local(line.split("#")[-1] if "#" in line else "UN")
+                    else:
+                        match = re.search(r'(\d+\.\d+\.\d+\.\d+)', line)
+                        if match: addr, tag = match.group(1), extract_country_local(line.split("#")[-1] if "#" in line else "UN")
+                    if addr and re.match(r'^\d+\.\d+\.\d+\.\d+$', addr): raw_ips.add((addr, tag))
             except: pass
-            continue
+        else:
+            try:
+                for rdata in dns.resolver.resolve(src, 'A'): domain_ips.add(rdata.address)
+            except: pass
 
-        # 2. URL 内容获取
-        content = get_content(src)
-        if not content: continue
-        try:
-            decoded = base64.b64decode(content + '=' * (-len(content) % 4)).decode('utf-8')
-        except: decoded = content
+    # 2. 处理订阅/列表 IP
+    print(f"[*] 正在对 {len(raw_ips)} 个节点进行可用性与延迟筛选...")
+    final_other_groups = defaultdict(list)
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(process_node, ip, tag) for ip, tag in raw_ips]
+        for f in futures:
+            res = f.result()
+            if res: final_other_groups[res['tag']].append(res)
 
-        for line in decoded.splitlines():
-            addr, tag = "", "UN"
-            if "vmess://" in line:
-                try:
-                    v2 = json.loads(base64.b64decode(line[8:]).decode('utf-8'))
-                    addr, tag = v2.get("add"), extract_country_from_label(v2.get("ps", ""))
-                except: continue
-            elif "://" in line and "@" in line:
-                match = re.search(r'@(.*?)(?::|/|\?|#)', line)
-                if match:
-                    addr = match.group(1)
-                    tag = extract_country_from_label(line.split("#")[-1] if "#" in line else "UN")
-            else:
-                match = re.search(r'(\d+\.\d+\.\d+\.\d+)', line)
-                if match:
-                    addr, tag = match.group(1), extract_country_from_label(line.split("#")[-1] if "#" in line else "UN")
-            
-            if addr and re.match(r'^\d+\.\d+\.\d+\.\d+$', addr):
-                all_raw_ips.add((addr, tag))
+    # 筛选各地区 Top 10
+    other_output = []
+    for region in ALLOWED_REGIONS:
+        sorted_nodes = sorted(final_other_groups[region], key=lambda x: x['latency'])[:TOP_N]
+        other_output.extend([f"{n['ip']}#{n['tag']}" for n in sorted_nodes])
+        print(f"    - {region} 筛选出 {len(sorted_nodes)} 个可用节点")
 
-    # --- 统一处理测速和 API 查询 ---
-    print(f"[*] 开始进行全球 API 归属地校对与 TCP 测速...")
-    ip_to_test = [ip for ip, tag in all_raw_ips]
-    # 如果本地能识别出国家且不是 UN，我们也测速，但如果识别不出，API 辅助
-    processed_data = process_api_and_ping(ip_to_test)
-
-    # --- 分组与排序 ---
-    country_groups = defaultdict(list)
-    for ip, initial_tag in all_raw_ips:
-        api_tag, latency = processed_data.get(ip, ("UN", 99999))
-        # 优先使用 API 识别出的国家，因为更准
-        final_tag = api_tag if api_tag != "UN" else initial_tag
-        
-        if final_tag in ALLOWED_OTHER and latency < 99999:
-            country_groups[final_tag].append((f"{ip}#{final_tag}", latency))
-
-    # --- 筛选 Top 10 ---
-    final_other_ips = []
-    for country in ALLOWED_OTHER:
-        # 按延迟排序
-        sorted_list = sorted(country_groups[country], key=lambda x: x[1])
-        top_10 = sorted_list[:TOP_N]
-        final_other_ips.extend([item[0] for item in top_10])
-        print(f"    [+] {country}: 筛选出 {len(top_10)} 个优质节点")
-
-    # 域名解析结果也取前 10
-    domain_top_10 = [item[0] for item in sorted(domain_results, key=lambda x: x[1])[:TOP_N]]
-
-    # 保存文件
-    with open("domain_ips.txt", "w", encoding="utf-8") as f:
-        f.write("\n".join(domain_top_10))
-    with open("other_ips.txt", "w", encoding="utf-8") as f:
-        f.write("\n".join(final_other_ips))
-
-    print(f"\n[任务完成] 域名 Top10 已保存, 其他各国家 Top10 已保存。")
+    # 3. 特别处理域名解析 IP
+    print(f"[*] 正在对域名解析出的 {len(domain_ips)} 个 IP 进行筛选...")
+    domain_verified = []
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(process_node, ip, "HK") for ip in domain_ips]
+        for f in futures:
+            res = f.result()
+            if res: domain_verified.append(res)
+    
+    domain_sorted = sorted(domain_verified, key=lambda x: x['latency'])[:TOP_N]
+    domain_output = [f"{n['ip']}#HK" for n in domain_sorted]
+    
+    # 4. 执行更新与保存
+    with open("domain_ips.txt", "w") as f: f.write("\n".join(domain_output))
+    with open("other_ips.txt", "w") as f: f.write("\n".join(other_output))
+    
+    if domain_sorted:
+        update_cloudflare_dns([n['ip'] for n in domain_sorted])
 
 if __name__ == "__main__":
     main()

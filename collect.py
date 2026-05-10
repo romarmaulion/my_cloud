@@ -23,7 +23,7 @@ SOURCES = [
 ]
 
 ALLOWED_REGIONS = {"HK", "JP", "SG", "TW", "US"}
-TOP_N = 10
+TOP_N = 5
 CHECK_API = "https://api.090227.xyz/check"
 
 # 从环境变量读取（新增 CF_BASE_DOMAIN）

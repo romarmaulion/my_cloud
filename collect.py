@@ -73,10 +73,13 @@ def tcp_ping(ip, port):
     except: return 99999
 
 def update_dns_record(record_name, ips):
-    """更新指定域名的 DNS A 记录（支持多 IP 负载均衡）"""
+    """更新指定域名的 DNS A 记录 (去重增强版)"""
     if not CF_API_TOKEN or not CF_ZONE_ID or not record_name:
         print(f"[!] 配置缺失，跳过 {record_name}")
         return
+    
+    # --- 核心修复 1: 强制去重 ---
+    ips = sorted(list(set(ips))) 
     
     headers = {
         "Authorization": f"Bearer {CF_API_TOKEN}",
@@ -85,21 +88,16 @@ def update_dns_record(record_name, ips):
     base_url = f"https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records"
 
     try:
-        print(f"[*] 正在更新域名: {record_name} (IP数: {len(ips)})")
+        print(f"[*] 正在更新域名: {record_name} (唯一IP数: {len(ips)})")
         
-        # 1. 查询现有记录
+        # 1. 查询并删除旧记录
         get_resp = requests.get(base_url, headers=headers, params={"name": record_name}).json()
-        if not get_resp.get("success"):
-            print(f"[!] 查询失败: {get_resp.get('errors')}")
-            return
-
-        # 2. 删除旧记录
-        for rec in get_resp.get("result", []):
-            del_resp = requests.delete(f"{base_url}/{rec['id']}", headers=headers).json()
-            if not del_resp.get("success"):
-                print(f"    [!] 删除旧记录失败: {del_resp.get('errors')}")
-
-        # 3. 添加新记录
+        if get_resp.get("success"):
+            existing_records = get_resp.get("result", [])
+            for rec in existing_records:
+                requests.delete(f"{base_url}/{rec['id']}", headers=headers)
+        
+        # 2. 批量添加新记录
         success_count = 0
         for ip in ips:
             data = {
@@ -110,12 +108,19 @@ def update_dns_record(record_name, ips):
                 "proxied": False
             }
             post_resp = requests.post(base_url, headers=headers, json=data).json()
+            
             if post_resp.get("success"):
                 success_count += 1
             else:
-                print(f"    [!] 添加 IP {ip} 失败: {post_resp.get('errors')}")
+                # --- 核心修复 2: 忽略“记录已存在”的错误 ---
+                errors = post_resp.get('errors', [])
+                if any(e.get('code') == 81058 for e in errors):
+                    print(f"    [i] IP {ip} 已存在，跳过")
+                    success_count += 1 # 既然已经存在，也算作成功
+                else:
+                    print(f"    [!] 添加 IP {ip} 失败: {errors}")
         
-        print(f"[+] {record_name}: 成功更新 {success_count} 条记录")
+        print(f"[+] {record_name}: 成功保持 {success_count} 条记录有效")
 
     except Exception as e:
         print(f"[!] 更新 {record_name} 时异常: {e}")

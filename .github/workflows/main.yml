@@ -1,0 +1,35 @@
+name: Auto IP Collector
+
+on:
+  schedule:
+    - cron: '0 * * * *'  # 每小时第0分钟自动运行
+  workflow_dispatch:      # 允许手动点击运行
+
+jobs:
+  run-task:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write    # 赋予写入权限，以便能推送文件回仓库
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Dependencies
+        run: pip install requests dnspython
+
+      - name: Run Script
+        run: python collect.py
+
+      - name: Commit and Push
+        run: |
+          git config --local user.email "actions@github.com"
+          git config --local user.name "GitHub Action"
+          git add domain_ips.txt other_ips.txt
+          # 只有在有变动时才提交，防止报错
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update IPs: $(date)" && git push)

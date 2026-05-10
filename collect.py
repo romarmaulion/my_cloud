@@ -65,25 +65,62 @@ def tcp_ping(ip, port):
     except: return 99999
 
 def update_cloudflare_dns(ips):
-    """更新 Cloudflare DNS 记录 (仅 IP)"""
+    """更新 Cloudflare DNS 记录 (增强调试版)"""
     if not CF_API_TOKEN or not CF_ZONE_ID or not CF_RECORD_NAME:
-        print("[!] 缺失 Cloudflare 环境变量，跳过 DNS 更新。")
+        print("[!] 错误: 缺失环境变量 CF_API_TOKEN, CF_ZONE_ID 或 CF_RECORD_NAME")
         return
 
-    headers = {"Authorization": f"Bearer {CF_API_TOKEN}", "Content-Type": "application/json"}
-    url = f"https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records"
+    headers = {
+        "Authorization": f"Bearer {CF_API_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    # 基础 URL
+    base_url = f"https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records"
 
     try:
-        existing = requests.get(url, headers=headers, params={"name": CF_RECORD_NAME}).json()
-        for rec in existing.get("result", []):
-            requests.delete(f"{url}/{rec['id']}", headers=headers)
+        # 1. 获取现有记录
+        # 注意：name 参数必须是完整域名，如 cf.example.com
+        print(f"[*] 正在查询域名记录: {CF_RECORD_NAME}")
+        params = {"name": CF_RECORD_NAME}
+        get_resp = requests.get(base_url, headers=headers, params=params).json()
         
+        if not get_resp.get("success"):
+            print(f"[!] 查询失败，CF 报错: {get_resp.get('errors')}")
+            return
+
+        # 2. 删除现有记录
+        existing_records = get_resp.get("result", [])
+        print(f"[*] 发现 {len(existing_records)} 条现有记录，准备删除...")
+        for rec in existing_records:
+            del_resp = requests.delete(f"{base_url}/{rec['id']}", headers=headers).json()
+            if not del_resp.get("success"):
+                print(f"    [!] 删除记录 {rec['id']} 失败: {del_resp.get('errors')}")
+
+        # 3. 批量添加新记录
+        print(f"[*] 正在添加 {len(ips)} 条新 A 记录...")
+        success_count = 0
         for ip in ips:
-            data = {"type": "A", "name": CF_RECORD_NAME, "content": ip, "ttl": 60, "proxied": False}
-            requests.post(url, headers=headers, json=data)
-        print(f"[+] 成功更新 {len(ips)} 个 IP 到 DNS: {CF_RECORD_NAME}")
+            data = {
+                "type": "A",
+                "name": CF_RECORD_NAME,
+                "content": ip,
+                "ttl": 60,
+                "proxied": False
+            }
+            post_resp = requests.post(base_url, headers=headers, json=data).json()
+            if post_resp.get("success"):
+                success_count += 1
+            else:
+                # 打印具体的错误原因，比如 "Invalid domain name" 或 "Record already exists"
+                print(f"    [!] 添加 IP {ip} 失败: {post_resp.get('errors')}")
+        
+        if success_count > 0:
+            print(f"[+] 成功更新 {success_count} 条记录到 DNS: {CF_RECORD_NAME}")
+        else:
+            print("[!] 未能成功更新任何记录，请检查上方报错信息。")
+
     except Exception as e:
-        print(f"[!] 更新 Cloudflare DNS 失败: {e}")
+        print(f"[!] 脚本执行异常: {e}")
 
 def process_node(ip, port, initial_tag):
     """单个节点的处理流程"""

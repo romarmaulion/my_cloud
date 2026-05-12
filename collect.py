@@ -5,7 +5,6 @@ import re
 import socket
 import dns.resolver
 import dns.rdatatype
-import dns.name
 import time
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,25 +14,34 @@ import threading
 
 # ================= 配置区域 =================
 SOURCES = [
-    # 域名类（DNS解析）
-    "ProxyIP.HK.CMLiussss.net",
-    "ProxyIP.JP.CMLiussss.net",
-    "sjc.o00o.ooo",
-    "tw.william.us.ci",
-    "proxy.xinyitang.dpdns.org",
-    # 订阅链接类（HTTP请求）
-    "https://sub.xinyitang.dpdns.org/sub?host=qq.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=%2F",
-    "https://sub.cmliussss.net/sub?host=qq.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=%2F",
-    "https://owo.o00o.ooo/sub?host=qq.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=%2F",
-    "https://cm.soso.edu.kg/sub?host=qq.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=%2F"
+    # 明确的地区域名（通常只返回该地区IP）
+    ("ProxyIP.HK.CMLiussss.net", "SINGLE"),    # 域名本身标注了地区
+    ("ProxyIP.JP.CMLiussss.net", "SINGLE"),    # 域名本身标注了地区
+    
+    # 混合负载均衡域名（返回多地区IP，需要用API探测真实地区）
+    ("sjc.o00o.ooo", "LB"),                    # SJC = San Jose，但可能LB返回多IP
+    ("tw.william.us.ci", "MIXED"),             # 看起来是TW但可能混合
+    ("proxy.xinyitang.dpdns.org", "LB"),       # 明确的LB域名，多地区
+    
+    # 订阅链接
+    ("https://sub.xinyitang.dpdns.org/sub?host=gmail-auto.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=%2F", "SUB"),
+    ("https://sub.cmliussss.net/sub?host=gmail-auto.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=%2F", "SUB"),
+    ("https://owo.o00o.ooo/sub?host=gmail-auto.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=%2F", "SUB"),
+    ("https://cm.soso.edu.kg/sub?host=gmail-auto.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=%2F", "SUB"),
 ]
 
+# 域名类型说明：
+# SINGLE: 域名名称本身明确标注地区（如 ProxyIP.HK），返回IP应该都是该地区
+# MIXED:  域名名称有提示但不明确，可能混合多个地区
+# LB:     明确的负载均衡域名，返回多个地区的IP，需要逐个检测
+
+# 对于SINGLE和MIXED类型的初始地区提示（仅用于无法检测时的备选）
 DOMAIN_REGION_HINT = {
-    "ProxyIP.HK.CMLiussss.net": "HK",
-    "ProxyIP.JP.CMLiussss.net": "JP",
-    "sjc.o00o.ooo":             "US",
-    "tw.william.us.ci":         "TW",
-    "proxy.xinyitang.dpdns.org":"HK",
+    "ProxyIP.HK.CMLiussss.net": ("HK", "SINGLE"),    # (地区提示, 源类型)
+    "ProxyIP.JP.CMLiussss.net": ("JP", "SINGLE"),
+    "sjc.o00o.ooo":             ("US", "MIXED"),     # SJC可能是，但要检测
+    "tw.william.us.ci":         ("TW", "MIXED"),
+    "proxy.xinyitang.dpdns.org":("UN", "LB"),        # LB域名不做地区假设！
 }
 
 ALLOWED_REGIONS = {"HK", "JP", "SG", "TW", "US"}
@@ -52,7 +60,6 @@ CUSTOM_DOMAIN_MAP = {
     "TW": os.getenv("CF_RECORD_TW"),
 }
 
-# 多个DNS服务器，优先级排序
 PUBLIC_DNS_SERVERS = [
     ("8.8.8.8", "Google"),
     ("1.1.1.1", "Cloudflare"),
@@ -79,7 +86,6 @@ class DNSResolver:
             resolver.nameservers = [dns_server]
             resolver.timeout = timeout
             resolver.lifetime = timeout * 2
-            # 禁用缓存
             resolver.cache = None
             
             answers = resolver.resolve(domain, rdtype)
@@ -110,23 +116,20 @@ class DNSResolver:
         visited.add(domain)
         ips = set()
         
-        # 先尝试直接A记录
         for dns_server, _ in PUBLIC_DNS_SERVERS:
             results = self.query_single_dns(domain, dns_server, 'A', timeout=4)
             ips.update(results)
         
-        # 再尝试CNAME
-        for dns_server, _ in PUBLIC_DNS_SERVERS[:3]:  # 只用前3个DNS查CNAME，加速
+        for dns_server, _ in PUBLIC_DNS_SERVERS[:3]:
             cnames = self.query_single_dns(domain, dns_server, 'CNAME', timeout=4)
             for cname in cnames:
-                # 递归查CNAME目标
                 cname_ips = self.resolve_cname_chain(cname, depth + 1, max_depth, visited)
                 ips.update(cname_ips)
         
         return ips
     
     def resolve_via_doh(self, domain):
-        """DNS-over-HTTPS查询（可穿透某些DNS污染）"""
+        """DNS-over-HTTPS查询"""
         ips = set()
         
         doh_servers = [
@@ -145,7 +148,7 @@ class DNSResolver:
                 ).json()
                 
                 for answer in resp.get("Answer", []):
-                    if answer.get("type") == 1:  # A记录
+                    if answer.get("type") == 1:
                         ip = answer.get("data", "")
                         if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip):
                             ips.add(ip)
@@ -155,10 +158,9 @@ class DNSResolver:
         return ips
     
     def resolve_via_system_nslookup(self, domain):
-        """调用系统 nslookup 命令（可能绕过python dns库限制）"""
+        """调用系统 nslookup 命令"""
         ips = set()
         try:
-            # Linux/Mac
             result = subprocess.run(
                 ["nslookup", domain],
                 capture_output=True,
@@ -166,7 +168,6 @@ class DNSResolver:
                 timeout=10
             )
             for line in result.stdout.split('\n'):
-                # 匹配 "Address: 1.2.3.4" 行
                 match = re.search(r'Address:\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', line)
                 if match:
                     ips.add(match.group(1))
@@ -179,7 +180,6 @@ class DNSResolver:
         """调用系统 dig 命令查询"""
         ips = set()
         try:
-            # 用dig查询，跳过系统缓存
             result = subprocess.run(
                 ["dig", "+short", domain, "A", "+nocmd"],
                 capture_output=True,
@@ -194,13 +194,12 @@ class DNSResolver:
         
         return ips
     
-    def resolve_all_methods(self, domain):
+    def resolve_all_methods(self, domain, source_type="LB"):
         """综合所有方法解析域名"""
         all_ips = set()
         
-        print(f"    [DNS] 开始多方法解析: {domain}")
+        print(f"    [DNS] 解析 {domain} (类型:{source_type})")
         
-        # 方法1: CNAME链递归
         try:
             cname_ips = self.resolve_cname_chain(domain)
             if cname_ips:
@@ -209,7 +208,6 @@ class DNSResolver:
         except Exception as e:
             print(f"      └─ CNAME链失败: {e}")
         
-        # 方法2: DoH
         try:
             doh_ips = self.resolve_via_doh(domain)
             if doh_ips:
@@ -218,7 +216,6 @@ class DNSResolver:
         except Exception as e:
             print(f"      └─ DoH失败: {e}")
         
-        # 方法3: 系统nslookup
         try:
             nslookup_ips = self.resolve_via_system_nslookup(domain)
             if nslookup_ips:
@@ -227,7 +224,6 @@ class DNSResolver:
         except Exception as e:
             print(f"      └─ nslookup失败: {e}")
         
-        # 方法4: 系统dig
         try:
             dig_ips = self.resolve_via_dig(domain)
             if dig_ips:
@@ -236,23 +232,23 @@ class DNSResolver:
         except Exception as e:
             print(f"      └─ dig失败: {e}")
         
-        # 方法5: 多次并发查询同一个DNS（获取不同的负载均衡IP）
-        try:
-            concurrent_ips = set()
-            with ThreadPoolExecutor(max_workers=8) as executor:
-                futures = [
-                    executor.submit(self.query_single_dns, domain, "8.8.8.8", 'A')
-                    for _ in range(8)
-                ]
-                for future in as_completed(futures):
-                    concurrent_ips.update(future.result())
-            if concurrent_ips:
-                print(f"      └─ 并发查询: {len(concurrent_ips)} IP")
-                all_ips.update(concurrent_ips)
-        except Exception as e:
-            print(f"      └─ 并发查询失败: {e}")
+        # 对LB和MIXED域名，多次并发查询以获取所有轮询IP
+        if source_type in ["LB", "MIXED"]:
+            try:
+                concurrent_ips = set()
+                with ThreadPoolExecutor(max_workers=15) as executor:
+                    futures = [
+                        executor.submit(self.query_single_dns, domain, "8.8.8.8", 'A')
+                        for _ in range(15)  # 15次查询，最大化获取不同的LB IP
+                    ]
+                    for future in as_completed(futures):
+                        concurrent_ips.update(future.result())
+                if concurrent_ips:
+                    print(f"      └─ 并发查询(15x): {len(concurrent_ips)} IP")
+                    all_ips.update(concurrent_ips)
+            except Exception as e:
+                print(f"      └─ 并发查询失败: {e}")
         
-        # 方法6: 多个公共DNS并发查询
         try:
             with ThreadPoolExecutor(max_workers=10) as executor:
                 futures = {
@@ -267,7 +263,7 @@ class DNSResolver:
         except Exception as e:
             print(f"      └─ 公共DNS失败: {e}")
         
-        print(f"    ✓ {domain} 最终解析到 {len(all_ips)} 个IP: {all_ips}\n")
+        print(f"    ✓ 最终收集 {len(all_ips)} 个IP\n")
         return all_ips
 
 
@@ -303,7 +299,7 @@ def extract_country_local(label):
 
 
 def check_availability(ip, port, retries=2):
-    """调用在线API检测节点可用性，带重试机制"""
+    """调用API检测节点可用性，获取真实地区"""
     for attempt in range(retries):
         try:
             resp = requests.get(
@@ -322,7 +318,7 @@ def check_availability(ip, port, retries=2):
                 return True, region
         except Exception as e:
             if attempt < retries - 1:
-                time.sleep(2)
+                time.sleep(1)
     
     return False, "UN"
 
@@ -348,7 +344,7 @@ def multi_ping(ip, port, count=3):
         if lat < 99999:
             results.append(lat)
         if _ < count - 1:
-            time.sleep(0.2)
+            time.sleep(0.1)
     return min(results) if results else 99999
 
 
@@ -367,19 +363,15 @@ def update_dns_record(record_name, ips):
     
     try:
         print(f"[*] 正在更新域名: {record_name}  IP列表: {ips}")
-        # 删除旧记录
         get_resp = requests.get(
             base_url, headers=headers, params={"name": record_name}, timeout=10
         ).json()
         if get_resp.get("success"):
             for rec in get_resp.get("result", []):
-                del_resp = requests.delete(
+                requests.delete(
                     f"{base_url}/{rec['id']}", headers=headers, timeout=10
-                ).json()
-                if del_resp.get("success"):
-                    print(f"  [-] 删除旧记录: {rec['id']}")
+                )
         
-        # 写入新记录
         for ip in ips:
             data = {
                 "type": "A",
@@ -388,11 +380,8 @@ def update_dns_record(record_name, ips):
                 "ttl": 60,
                 "proxied": False,
             }
-            post_resp = requests.post(
-                base_url, headers=headers, json=data, timeout=10
-            ).json()
-            status = "✓" if post_resp.get("success") else "✗"
-            print(f"  [{status}] 添加 {ip}")
+            requests.post(base_url, headers=headers, json=data, timeout=10)
+            print(f"  [+] 添加 {ip}")
     except Exception as e:
         print(f"[!] DNS更新出错: {e}")
 
@@ -408,8 +397,11 @@ def get_region_domain(region_code):
 
 
 def process_node(ip, port, initial_tag):
-    """检测单个节点"""
+    """检测单个节点，获取真实地区"""
+    # ⭐ 关键：总是调用API检测真实地区，不依赖初始标签
     is_ok, real_region = check_availability(ip, port)
+    
+    # 使用真实地区，如果检测失败才用初始标签作备选
     tag = real_region if real_region != "UN" else initial_tag
     
     if is_ok and tag in ALLOWED_REGIONS:
@@ -448,7 +440,6 @@ def fetch_subscription(url):
 
             addr, port, tag = "", "443", "UN"
 
-            # vmess
             if line.startswith("vmess://"):
                 try:
                     v2 = json.loads(
@@ -460,7 +451,6 @@ def fetch_subscription(url):
                 except Exception:
                     pass
 
-            # vless / trojan / ss / hy2
             elif "://" in line and "@" in line:
                 match = re.search(r'@([^:@\s]+):(\d+)', line)
                 if match:
@@ -469,7 +459,6 @@ def fetch_subscription(url):
                     label = line.split("#")[-1] if "#" in line else line
                     tag = extract_country_local(label)
 
-            # 纯IP
             else:
                 match = re.search(r'(\d{1,3}(?:\.\d{1,3}){3})(?::(\d+))?', line)
                 if match:
@@ -488,53 +477,59 @@ def fetch_subscription(url):
 
 
 def main():
-    print("\n" + "=" * 60)
-    print("🚀 ProxyIP 节点收集工具 v2.0")
-    print("=" * 60 + "\n")
+    print("\n" + "=" * 70)
+    print("🚀 ProxyIP 节点收集工具 v3.0 (智能LB域名处理)")
+    print("=" * 70 + "\n")
 
     dns_resolver = DNSResolver()
-    domain_raw: dict[str, set] = {}
+    domain_raw: dict[str, set] = {}  # domain -> IPs
     sub_raw_data: set = set()
 
     # ===== 阶段1：收集原始数据 =====
     print("[1/4] 📡 收集原始节点数据...\n")
 
-    for src in SOURCES:
+    for src, *extra in SOURCES:
         if src.startswith("http"):
             print(f"  📥 [订阅] {src[:70]}")
             nodes = fetch_subscription(src)
             print(f"     ✓ 解析到 {len(nodes)} 个节点\n")
             sub_raw_data.update(nodes)
         else:
-            hint = DOMAIN_REGION_HINT.get(src, "UN")
-            ips = dns_resolver.resolve_all_methods(src)
-            domain_raw[src] = ips
+            # 获取源的类型
+            if src in DOMAIN_REGION_HINT:
+                hint, source_type = DOMAIN_REGION_HINT[src]
+            else:
+                hint, source_type = "UN", "LB"
+            
+            # ⭐ 关键改进：根据源类型选择DNS解析策略
+            ips = dns_resolver.resolve_all_methods(src, source_type)
+            domain_raw[src] = (ips, hint, source_type)
 
-    # 汇总域名IP
-    domain_ip_hint: dict[str, str] = {}
-    for domain, ips in domain_raw.items():
-        hint = DOMAIN_REGION_HINT.get(domain, "UN")
+    # 汇总域名IP（去重，保留元数据）
+    domain_ip_with_meta: dict[str, tuple] = {}  # ip -> (domain, hint, source_type)
+    for domain, (ips, hint, source_type) in domain_raw.items():
         for ip in ips:
-            if ip not in domain_ip_hint or domain_ip_hint[ip] == "UN":
-                domain_ip_hint[ip] = hint
+            if ip not in domain_ip_with_meta:
+                domain_ip_with_meta[ip] = (domain, hint, source_type)
 
-    total_domain_raw = len(domain_ip_hint)
+    total_domain_raw = len(domain_ip_with_meta)
     total_sub_raw = len(sub_raw_data)
 
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
     print(f"📊 收集结果: 域名源={total_domain_raw} IP  |  订阅源={total_sub_raw} 节点")
-    print("=" * 60 + "\n")
+    print("=" * 70 + "\n")
 
     # ===== 阶段2：检测域名IP =====
-    print("[2/4] 🔍 检测域名源IP...\n")
+    print("[2/4] 🔍 检测域名源IP (逐个API检测真实地区)...\n")
 
     domain_verified_groups: dict[str, list] = defaultdict(list)
     tested_ips = 0
 
     with ThreadPoolExecutor(max_workers=20) as executor:
+        # ⭐ 关键：不使用初始地区提示，而是用"UN"强制API检测
         future_map = {
-            executor.submit(process_node, ip, "443", hint): ip
-            for ip, hint in domain_ip_hint.items()
+            executor.submit(process_node, ip, "443", "UN"): (ip, meta)
+            for ip, meta in domain_ip_with_meta.items()
         }
         
         for future in as_completed(future_map):
@@ -542,22 +537,24 @@ def main():
             res = future.result()
             if res:
                 domain_verified_groups[res["tag"]].append(res)
-                print(f"  ✓ [{tested_ips}/{total_domain_raw}] {res['ip']}:{res['port']} "
-                      f"| {res['tag']} | {res['latency']}ms")
+                domain, hint, stype = future_map[future][1]
+                print(f"  ✓ [{tested_ips:4d}/{total_domain_raw}] {res['ip']}:{res['port']} "
+                      f"| {res['tag']:2s} | {res['latency']:5d}ms | from:{domain} (hint:{hint})")
             else:
-                if tested_ips % 5 == 0:
-                    print(f"  ✗ [{tested_ips}/{total_domain_raw}] 测试中...")
+                if tested_ips % 10 == 0:
+                    print(f"  ⏳ [{tested_ips:4d}/{total_domain_raw}] 测试中...")
 
     total_domain_ok = sum(len(v) for v in domain_verified_groups.values())
     print(f"\n  ✓ 域名源通过: {total_domain_ok}/{total_domain_raw}\n")
 
     # ===== 阶段3：检测订阅IP =====
-    print("[3/4] 🔍 检测订阅源IP...\n")
+    print("[3/4] 🔍 检测订阅源IP (逐个API检测真实地区)...\n")
 
     sub_verified_groups: dict[str, list] = defaultdict(list)
     tested_nodes = 0
 
     with ThreadPoolExecutor(max_workers=20) as executor:
+        # ⭐ 订阅源的IP通常已有标签，但也要通过API检测以确保准确
         future_map = {
             executor.submit(process_node, ip, port, tag): (ip, port, tag)
             for ip, port, tag in sub_raw_data
@@ -568,11 +565,13 @@ def main():
             res = future.result()
             if res:
                 sub_verified_groups[res["tag"]].append(res)
-                print(f"  ✓ [{tested_nodes}/{total_sub_raw}] {res['ip']}:{res['port']} "
-                      f"| {res['tag']} | {res['latency']}ms")
+                orig_ip, orig_port, orig_tag = future_map[future]
+                status = "✓" if res["tag"] == orig_tag else "✓(修正)"
+                print(f"  {status} [{tested_nodes:4d}/{total_sub_raw}] {res['ip']}:{res['port']} "
+                      f"| {res['tag']:2s} | {res['latency']:5d}ms | orig_tag:{orig_tag}")
             else:
-                if tested_nodes % 5 == 0:
-                    print(f"  ✗ [{tested_nodes}/{total_sub_raw}] 测试中...")
+                if tested_nodes % 10 == 0:
+                    print(f"  ⏳ [{tested_nodes:4d}/{total_sub_raw}] 测试中...")
 
     total_sub_ok = sum(len(v) for v in sub_verified_groups.values())
     print(f"\n  ✓ 订阅源通过: {total_sub_ok}/{total_sub_raw}\n")
@@ -612,10 +611,10 @@ def main():
     with open("other_ips.txt", "w", encoding="utf-8") as f:
         f.write("\n".join(other_out_lines))
 
-    # 4-D: 统计汇总
-    print("\n" + "=" * 60)
+    # 4-D: 汇总统计
+    print("\n" + "=" * 70)
     print("📈 最终统计")
-    print("=" * 60)
+    print("=" * 70)
     print(f"\n  domain_ips.txt ({len(domain_out_lines)} 行):")
     for region in sorted(ALLOWED_REGIONS):
         count = len([x for x in domain_out_lines if f"#{region}" in x])
@@ -626,7 +625,7 @@ def main():
         count = len([x for x in other_out_lines if f"#{region}" in x])
         print(f"    {region}: {count:3d} 个")
 
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
     print("✅ 任务完成!\n")
 
 

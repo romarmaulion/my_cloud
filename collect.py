@@ -12,30 +12,52 @@ from collections import defaultdict
 # ================= 配置 =================
 
 SOURCES = [
-    # 域名
     ("ProxyIP.HK.CMLiussss.net", "DOMAIN"),
     ("ProxyIP.JP.CMLiussss.net", "DOMAIN"),
     ("sjc.o00o.ooo", "DOMAIN"),
     ("tw.william.us.ci", "DOMAIN"),
     ("proxy.xinyitang.dpdns.org", "DOMAIN"),
 
-    # 订阅
-    ("https://sub.xinyitang.dpdns.org/sub?host=qq.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=/", "SUB"),
-    ("https://sub.cmliussss.net/sub?host=qq.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=/", "SUB"),
+    ("https://sub.xinyitang.dpdns.org/sub?host=qq.romarmaulion.ccwu.cc&uuid=xxx&path=/", "SUB"),
 ]
 
 ALLOWED_REGIONS = {"HK", "JP", "SG", "TW", "US"}
 TOP_N = 5
 CHECK_API = "https://api.090227.xyz/check"
 
-CF_API_TOKEN   = os.getenv("CF_API_TOKEN")
-CF_ZONE_ID     = os.getenv("CF_ZONE_ID")
+CF_API_TOKEN = os.getenv("CF_API_TOKEN")
+CF_ZONE_ID = os.getenv("CF_ZONE_ID")
 CF_BASE_DOMAIN = os.getenv("CF_BASE_DOMAIN")
+
+CUSTOM_DOMAIN_MAP = {
+    "HK": os.getenv("CF_RECORD_HK"),
+    "JP": os.getenv("CF_RECORD_JP"),
+    "US": os.getenv("CF_RECORD_US"),
+    "SG": os.getenv("CF_RECORD_SG"),
+    "TW": os.getenv("CF_RECORD_TW"),
+}
 
 # ================= 工具函数 =================
 
 def log(msg):
     print(msg, flush=True)
+
+
+def resolve_domain(domain):
+    ips = set()
+    log(f"🌐 解析域名: {domain}")
+    try:
+        resolver = dns.resolver.Resolver()
+        answers = resolver.resolve(domain, "A")
+        for r in answers:
+            ips.add(r.address)
+    except:
+        pass
+
+    for ip in ips:
+        log(f"   ↳ {ip}")
+
+    return ips
 
 
 def safe_b64decode(data):
@@ -49,37 +71,13 @@ def safe_b64decode(data):
         return None
 
 
-def resolve_domain(domain):
-    """解析域名为IP"""
-    ips = set()
-    try:
-        resolver = dns.resolver.Resolver()
-        answers = resolver.resolve(domain, "A")
-        for r in answers:
-            ips.add(r.address)
-    except:
-        pass
-
-    if not ips:
-        try:
-            ips.add(socket.gethostbyname(domain))
-        except:
-            pass
-
-    return ips
-
-
 def extract_host_port(line):
-    """从节点链接中提取 host:port"""
     if line.startswith("vmess://"):
         decoded = safe_b64decode(line[8:])
         if not decoded:
             return None
-        try:
-            obj = json.loads(decoded)
-            return obj.get("add"), str(obj.get("port", "443"))
-        except:
-            return None
+        obj = json.loads(decoded)
+        return obj.get("add"), str(obj.get("port", "443"))
 
     if "://" in line:
         body = line.split("://", 1)[1]
@@ -87,26 +85,18 @@ def extract_host_port(line):
             body = body.split("@", 1)[1]
         body = body.split("/")[0].split("?")[0]
         if ":" in body:
-            host, port = body.split(":", 1)
-        else:
-            host, port = body, "443"
-        return host, port
+            return body.split(":", 1)
+        return body, "443"
 
     return None
 
 
 def fetch_subscription(url):
-    """获取订阅"""
     nodes = set()
+    log(f"📥 订阅: {url[:60]}")
     try:
-        headers = {"User-Agent": "v2rayNG/1.8.5"}
-        resp = requests.get(url, headers=headers, timeout=20)
+        resp = requests.get(url, timeout=20)
         content = resp.text
-
-        if "Just a moment" in content:
-            log("⚠️  被 Cloudflare 拦截")
-            return set()
-
         decoded = safe_b64decode(content)
         lines = decoded.splitlines() if decoded else content.splitlines()
 
@@ -129,7 +119,7 @@ def fetch_subscription(url):
                     nodes.add((ip, port))
 
     except Exception as e:
-        log(f"订阅获取失败: {e}")
+        log(f"订阅失败: {e}")
 
     return nodes
 
@@ -143,17 +133,15 @@ def check_node(ip, port):
         ).json()
 
         if resp.get("success"):
-            region = (
+            return (
                 resp.get("probe_results", {})
                 .get("ipv4", {})
                 .get("exit", {})
                 .get("country", "UN")
                 .upper()
             )
-            return region
     except:
         pass
-
     return None
 
 
@@ -167,62 +155,103 @@ def tcp_latency(ip, port):
         return 99999
 
 
+def update_dns(region, ips):
+    if not CF_API_TOKEN or not CF_ZONE_ID:
+        return
+
+    record_name = CUSTOM_DOMAIN_MAP.get(region)
+    if not record_name:
+        if CF_BASE_DOMAIN:
+            record_name = f"{region.lower()}.{CF_BASE_DOMAIN}"
+        else:
+            return
+
+    headers = {
+        "Authorization": f"Bearer {CF_API_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+    base_url = f"https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records"
+
+    log(f"🌍 更新 {record_name} → {ips}")
+
+    # 删除旧记录
+    resp = requests.get(base_url, headers=headers, params={"name": record_name}).json()
+    if resp.get("success"):
+        for rec in resp.get("result", []):
+            requests.delete(f"{base_url}/{rec['id']}", headers=headers)
+
+    # 添加新记录
+    for ip in ips:
+        data = {
+            "type": "A",
+            "name": record_name,
+            "content": ip,
+            "ttl": 60,
+            "proxied": False
+        }
+        requests.post(base_url, headers=headers, json=data)
+
+
 # ================= 主流程 =================
 
 def main():
-    log("🚀 开始收集节点")
+    domain_nodes = set()
+    sub_nodes = set()
 
-    raw_nodes = set()
-
-    # 收集阶段
     for src, typ in SOURCES:
         if typ == "DOMAIN":
-            log(f"🌐 解析域名: {src}")
             ips = resolve_domain(src)
             for ip in ips:
-                raw_nodes.add((ip, "443"))
+                domain_nodes.add((ip, "443"))
 
-        elif typ == "SUB":
-            log(f"📥 获取订阅: {src[:50]}")
-            nodes = fetch_subscription(src)
-            raw_nodes.update(nodes)
+        if typ == "SUB":
+            sub_nodes.update(fetch_subscription(src))
 
-    log(f"✅ 共收集 {len(raw_nodes)} 个节点，开始检测...")
+    verified_domain = defaultdict(list)
+    verified_sub = defaultdict(list)
 
-    verified = defaultdict(list)
+    all_nodes = [(ip, port, "DOMAIN") for ip, port in domain_nodes] + \
+                [(ip, port, "SUB") for ip, port in sub_nodes]
 
-    # 检测阶段
+    log("\n🔍 开始检测...\n")
+
     with ThreadPoolExecutor(max_workers=20) as executor:
         futures = {
-            executor.submit(check_node, ip, port): (ip, port)
-            for ip, port in raw_nodes
+            executor.submit(check_node, ip, port): (ip, port, st)
+            for ip, port, st in all_nodes
         }
 
         for future in as_completed(futures):
-            ip, port = futures[future]
+            ip, port, st = futures[future]
             region = future.result()
 
             if region in ALLOWED_REGIONS:
                 latency = tcp_latency(ip, port)
                 if latency < 2000:
-                    verified[region].append({
-                        "ip": ip,
-                        "port": port,
-                        "latency": latency
-                    })
-                    log(f"✅ {ip}:{port} {region} {latency}ms")
+                    log(f"✅ {ip}:{port} {region} {latency}ms 来源:{st}")
+                    if st == "DOMAIN":
+                        verified_domain[region].append((ip, latency))
+                    else:
+                        verified_sub[region].append((ip, port, latency))
 
-    # 输出文件
-    domain_lines = []
+    # 更新CF
     for region in ALLOWED_REGIONS:
-        nodes = sorted(verified[region], key=lambda x: x["latency"])[:TOP_N]
-        for n in nodes:
-            domain_lines.append(f"{n['ip']}#{region}")
+        nodes = sorted(verified_domain[region], key=lambda x: x[1])[:TOP_N]
+        update_dns(region, [ip for ip, _ in nodes])
 
+    # 写文件
     with open("domain_ips.txt", "w") as f:
-        f.write("\n".join(domain_lines))
+        for region in ALLOWED_REGIONS:
+            for ip, latency in verified_domain[region]:
+                f.write(f"{ip}#{region}\n")
 
-    log(f"✅ 输出完成，共 {len(domain_lines)} 个优选节点")
+    with open("other_ips.txt", "w") as f:
+        for region in ALLOWED_REGIONS:
+            for ip, port, latency in verified_sub[region]:
+                f.write(f"{ip}:{port}#{region}\n")
+
+    log("\n✅ 完成")
 
 
 if __name__ == "__main__":

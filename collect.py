@@ -59,7 +59,6 @@ PUBLIC_DNS_SERVERS = [
     "119.29.29.29",
 ]
 
-# User-Agent列表（轮流使用，规避反爬）
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
@@ -69,6 +68,7 @@ USER_AGENTS = [
 ]
 
 # ===========================================
+
 
 class CloudflareBypassHTTPClient:
     """支持Cloudflare绕过的HTTP客户端"""
@@ -103,7 +103,7 @@ class CloudflareBypassHTTPClient:
             session = requests.Session()
             resp = session.get(url, headers=headers, timeout=timeout, allow_redirects=True)
             return resp.text if resp.status_code == 200 else None
-        except Exception as e:
+        except Exception:
             return None
     
     def _fetch_with_curl(self, url, timeout=20):
@@ -114,4 +114,35 @@ class CloudflareBypassHTTPClient:
                 "-s",
                 "-L",
                 "-A", self._get_user_agent(),
-                
+                "-b", "/tmp/cookies.txt",
+                "-c", "/tmp/cookies.txt",
+                "--compressed",
+                "--max-time", str(timeout),
+                url
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout+5)
+            return result.stdout if result.returncode == 0 else None
+        except Exception:
+            return None
+    
+    def _fetch_with_wget(self, url, timeout=20):
+        """用wget备选"""
+        try:
+            cmd = [
+                "wget",
+                "-q",
+                "-O", "-",
+                "-U", self._get_user_agent(),
+                "--save-cookies=/tmp/cookies.txt",
+                "--keep-session-cookies",
+                "--timeout=" + str(timeout),
+                url
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout+5)
+            return result.stdout if result.returncode == 0 else None
+        except Exception:
+            return None
+    
+    def fetch(self, url):
+        """多方法获取，优先级：curl > wget > requests"""
+        

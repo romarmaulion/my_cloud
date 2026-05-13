@@ -14,10 +14,10 @@ from collections import defaultdict
 
 SOURCES = [
     # 域名源
-    ("ProxyIP.HK.CMLiussss.net", "DOMAIN"),
+    ("ProxyIP.KR.CMLiussss.net", "DOMAIN"),
     ("ProxyIP.JP.CMLiussss.net", "DOMAIN"),
     ("sjc.o00o.ooo", "DOMAIN"),
-    ("tw.william.us.ci", "DOMAIN"),
+    ("kr.william.us.ci", "DOMAIN"),
     ("proxy.xinyitang.dpdns.org", "DOMAIN"),
     ("jp.cle.us.ci", "DOMAIN"),
      ("sg.cle.us.ci", "DOMAIN"),
@@ -29,7 +29,7 @@ SOURCES = [
     ("https://cm.soso.edu.kg/sub?host=qq.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=/", "SUB"),
 ]
 
-ALLOWED_REGIONS = {"HK", "JP", "SG", "TW", "US"}
+ALLOWED_REGIONS = {"HK", "JP", "SG", "KR", "US"}
 TOP_N = 5
 CHECK_API = "https://api.090227.xyz/check"
 
@@ -42,7 +42,7 @@ CUSTOM_DOMAIN_MAP = {
     "SG": os.getenv("CF_RECORD_SG"),
     "US": os.getenv("CF_RECORD_US"),
     "JP": os.getenv("CF_RECORD_JP"),
-    "TW": os.getenv("CF_RECORD_TW"),
+    "KR": os.getenv("CF_RECORD_KR"),
 }
 
 # 扩展到 10 个公共 DNS

@@ -17,7 +17,7 @@ SOURCES = [
     ("ProxyIP.KR.CMLiussss.net", "DOMAIN"),
     ("ProxyIP.JP.CMLiussss.net", "DOMAIN"),
     ("sjc.o00o.ooo", "DOMAIN"),
-    ("kr.william.us.ci", "DOMAIN"),
+    ("tw.william.us.ci", "DOMAIN"),
     ("proxy.xinyitang.dpdns.org", "DOMAIN"),
     ("jp.cle.us.ci", "DOMAIN"),
      ("sg.cle.us.ci", "DOMAIN"),

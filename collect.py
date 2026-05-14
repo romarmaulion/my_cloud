@@ -29,7 +29,7 @@ SOURCES = [
     ("https://cm.soso.edu.kg/sub?host=qq.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=/", "SUB"),
 ]
 
-ALLOWED_REGIONS = {"HK", "JP", "SG", "KR", "US"}
+ALLOWED_REGIONS = {"HK", "JP", "SG", "KR", "US", "TW" }
 TOP_N = 5
 CHECK_API = "https://api.090227.xyz/check"
 

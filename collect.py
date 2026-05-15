@@ -8,6 +8,7 @@ from collections import defaultdict
 import re
 from urllib.parse import urlparse, parse_qs
 import sys
+import traceback
 
 # ================= GitHub Actions 专用环境变量处理 =================
 def get_github_env_var(var_name, required=False, default=None):
@@ -15,33 +16,24 @@ def get_github_env_var(var_name, required=False, default=None):
     专门处理GitHub Actions环境变量
     支持多种获取方式，解决GitHub Actions环境变量问题
     """
-    # 调试：打印所有环境变量（仅在DEBUG模式下）
-    if os.environ.get('DEBUG_ENV', 'false').lower() in ['true', '1', 'yes']:
-        print("🔍 所有可用环境变量（调试模式）:")
-        for key in sorted(os.environ.keys()):
-            if any(x in key.lower() for x in ['cf_', 'base_', 'token', 'zone', 'secret', 'input']):
-                value_preview = os.environ[key][:50] + '...' if len(os.environ[key]) > 50 else os.environ[key]
-                print(f"   {key} = {value_preview}")
-        print("-" * 60)
-    
-    # 方法1: 直接从环境变量获取（优先）
+    # 尝试从环境变量获取
     value = os.environ.get(var_name)
     if value and value.strip():
         return value.strip()
     
-    # 方法2: 尝试从GitHub Secrets格式获取
+    # 尝试从GitHub Secrets格式获取
     secrets_var_name = f"SECRETS_{var_name}"
     value = os.environ.get(secrets_var_name)
     if value and value.strip():
         return value.strip()
     
-    # 方法3: 尝试从INPUT_前缀获取（适用于action输入）
+    # 尝试从INPUT_前缀获取
     input_var_name = f"INPUT_{var_name.upper()}"
     value = os.environ.get(input_var_name)
     if value and value.strip():
         return value.strip()
     
-    # 方法4: 尝试常见变体
+    # 尝试常见变体
     common_variants = [
         var_name.upper(),
         var_name.lower(),
@@ -58,65 +50,65 @@ def get_github_env_var(var_name, required=False, default=None):
     # 如果是必需的变量且没有找到，显示详细错误
     if required:
         error_msg = f"❌ 缺少必需的环境变量: {var_name}"
-        print(f"::error::{error_msg}", flush=True)  # GitHub Actions error annotation
+        print(f"::error::{error_msg}", flush=True)
         
-        # 提供详细的设置指导
-        setup_guide = f"""
-::group::🔧 如何正确设置环境变量
-在GitHub仓库中设置环境变量的步骤：
+        # 提供设置指导
+        print(f"""
+::group::🔧 环境变量设置指南
+请在GitHub仓库中设置以下Secrets:
 
-1. 访问仓库设置: {os.environ.get('GITHUB_REPOSITORY', 'your-repo')}/settings
-2. 左侧菜单选择 "Secrets and variables" > "Actions"
-3. 点击 "New repository secret" 按钮
-4. 按以下名称设置变量:
+1. 访问: {os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{os.environ.get('GITHUB_REPOSITORY', 'your-repo')}/settings/secrets/actions
+2. 添加以下Repository Secrets:
 
-   🔑 变量名称                  🔑 值
-   ──────────────────────────────────────────────────────────────
-   BASE_DOMAIN        = 你的域名（例如：example.com）
-   CF_API_TOKEN       = Cloudflare API Token
-   CF_ZONE_ID         = Cloudflare Zone ID
+   🔑 名称           🔑 值示例
+   ────────────────────────────────────────────────────────
+   BASE_DOMAIN       your-domain.com
+   CF_API_TOKEN      your_cloudflare_api_token
+   CF_ZONE_ID        your_cloudflare_zone_id
 
-5. 保存后重新运行Action
-
-注意: 
-- 变量名称必须完全匹配（区分大小写）
-- API Token需要有DNS编辑权限
-- 不要包含空格或特殊字符
+3. 保存后重新运行Action
 ::endgroup::
-        """
-        print(setup_guide, flush=True)
+        """, flush=True)
         
         # 显示当前找到的相关环境变量
-        print("\n🔍 当前找到的相关环境变量:")
+        print("\n🔍 当前找到的相关环境变量:", flush=True)
         found_any = False
+        relevant_keys = []
         for key in sorted(os.environ.keys()):
-            if any(x in key.lower() for x in ['cf_', 'base_', 'token', 'zone', 'domain']):
+            key_lower = key.lower()
+            if any(x in key_lower for x in ['cf_', 'base_', 'token', 'zone', 'domain', 'secret', 'input']):
+                relevant_keys.append(key)
                 found_any = True
-                value_preview = os.environ[key][:30] + '...' if len(os.environ[key]) > 30 else os.environ[key]
-                print(f"   ✅ {key} = {value_preview}")
         
-        if not found_any:
-            print("   ❌ 未找到任何相关的环境变量")
+        if found_any:
+            for key in relevant_keys[:10]:  # 只显示前10个
+                value = os.environ[key]
+                value_preview = value[:30] + '...' if len(value) > 30 else value
+                print(f"   ✅ {key} = {value_preview}", flush=True)
+            if len(relevant_keys) > 10:
+                print(f"   ... 还有 {len(relevant_keys) - 10} 个相关变量", flush=True)
+        else:
+            print("   ❌ 未找到任何相关的环境变量", flush=True)
         
         sys.exit(1)
     
     return default
 
 
-# ================= 配置 =================
+# ================= 配置加载 =================
 def load_config():
     """加载配置，专门处理GitHub Actions环境"""
-    print("🚀 开始加载配置...")
+    print("🚀 开始加载配置...", flush=True)
     
     # 获取必需的环境变量
     BASE_DOMAIN = get_github_env_var("BASE_DOMAIN", required=True)
     CF_API_TOKEN = get_github_env_var("CF_API_TOKEN", required=True)
     CF_ZONE_ID = get_github_env_var("CF_ZONE_ID", required=True)
     
-    print(f"✅ 配置加载成功:")
-    print(f"   🌐 BASE_DOMAIN: {BASE_DOMAIN}")
-    print(f"   🔑 CF_API_TOKEN: {'*' * (len(CF_API_TOKEN) - 4) + CF_API_TOKEN[-4:] if CF_API_TOKEN else '未设置'}")
-    print(f"   🆔 CF_ZONE_ID: {CF_ZONE_ID[:8]}...")
+    print(f"✅ 配置加载成功:", flush=True)
+    print(f"   🌐 BASE_DOMAIN: {BASE_DOMAIN}", flush=True)
+    print(f"   🔑 CF_API_TOKEN: {'*' * (len(CF_API_TOKEN) - 4) + CF_API_TOKEN[-4:]}", flush=True)
+    print(f"   🆔 CF_ZONE_ID: {CF_ZONE_ID[:8]}...", flush=True)
     
     return {
         "BASE_DOMAIN": BASE_DOMAIN,
@@ -125,11 +117,16 @@ def load_config():
     }
 
 # 加载配置
-CONFIG = load_config()
-BASE_DOMAIN = CONFIG["BASE_DOMAIN"]
-CF_API_TOKEN = CONFIG["CF_API_TOKEN"]
-CF_ZONE_ID = CONFIG["CF_ZONE_ID"]
+try:
+    CONFIG = load_config()
+    BASE_DOMAIN = CONFIG["BASE_DOMAIN"]
+    CF_API_TOKEN = CONFIG["CF_API_TOKEN"]
+    CF_ZONE_ID = CONFIG["CF_ZONE_ID"]
+except Exception as e:
+    print(f"❌ 配置加载失败: {e}", file=sys.stderr, flush=True)
+    sys.exit(1)
 
+# ================= 动态配置 =================
 # ProxyIP 域名
 PROXYIP_DOMAINS = [
     "tw.william.us.ci",
@@ -139,48 +136,50 @@ PROXYIP_DOMAINS = [
     "ProxyIP.KR.CMLiussss.net",
 ]
 
-# 订阅源 - 从环境变量获取，支持多行
+# 订阅源 - 从环境变量获取
 SUB_SOURCES_ENV = os.environ.get("SUB_SOURCES", "").strip()
 SUB_SOURCES = [url.strip() for url in SUB_SOURCES_ENV.splitlines() if url.strip()] or [
     "https://sub.xinyitang.dpdns.org/sub?host=qq.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=/",
 ]
 
 # 每地区随机保留数量
-TOP_N = int(os.environ.get("TOP_N", "5"))
+try:
+    TOP_N = int(os.environ.get("TOP_N", "5"))
+except ValueError:
+    TOP_N = 5
 
-# 允许地区 - 从环境变量获取，支持逗号分隔
+# 允许地区
 ALLOWED_REGIONS_ENV = os.environ.get("ALLOWED_REGIONS", "HK,JP,SG,KR,TW,US").strip()
 ALLOWED_REGIONS = {region.strip().upper() for region in ALLOWED_REGIONS_ENV.split(",") if region.strip()}
 
 # ProxyIP API
 CHECK_API = os.environ.get("CHECK_API", "https://check.proxyip.cmliussss.net/api/check")
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
-}
-
-# IP段过滤配置（从环境变量获取）
+# IP段过滤配置
 IP_PREFIXES = {}
 ip_prefixes_env = os.environ.get("IP_PREFIXES", "").strip()
 if ip_prefixes_env:
     for line in ip_prefixes_env.splitlines():
-        if ":" in line:
-            region, prefixes = line.split(":", 1)
-            region = region.strip().upper()
-            prefix_list = [p.strip() for p in prefixes.split(",") if p.strip()]
-            if region and prefix_list:
-                IP_PREFIXES[region] = prefix_list
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+        region_part, prefixes_part = line.split(":", 1)
+        region = region_part.strip().upper()
+        prefix_list = [p.strip() for p in prefixes_part.split(",") if p.strip()]
+        if region and prefix_list:
+            IP_PREFIXES[region] = prefix_list
 
-print(f"📋 运行配置:")
-print(f"   🎯 ProxyIP域名数量: {len(PROXYIP_DOMAINS)}")
-print(f"   📡 订阅源数量: {len(SUB_SOURCES)}")
-print(f"   🌍 允许地区: {', '.join(sorted(ALLOWED_REGIONS))}")
-print(f"   📊 每地区保留: {TOP_N} 个节点")
-print(f"   🔍 IP前缀过滤: {'已配置' if IP_PREFIXES else '未配置'}")
-print("-" * 60)
+# 调试模式
+DEBUG_MODE = os.environ.get("DEBUG", "false").lower() in ["true", "1", "yes"]
 
+print(f"\n📋 运行配置:", flush=True)
+print(f"   🎯 ProxyIP域名数量: {len(PROXYIP_DOMAINS)}", flush=True)
+print(f"   📡 订阅源数量: {len(SUB_SOURCES)}", flush=True)
+print(f"   🌍 允许地区: {', '.join(sorted(ALLOWED_REGIONS))}", flush=True)
+print(f"   📊 每地区保留: {TOP_N} 个节点", flush=True)
+print(f"   🔍 IP前缀过滤: {'已配置' if IP_PREFIXES else '未配置'}", flush=True)
+print(f"   🐞 调试模式: {'启用' if DEBUG_MODE else '禁用'}", flush=True)
+print("-" * 60, flush=True)
 
 # ================= 工具函数 =================
 
@@ -207,8 +206,8 @@ def log(msg, level="INFO"):
 
 
 def debug_log(msg):
-    """调试日志，只在DEBUG模式下显示"""
-    if os.environ.get("DEBUG", "false").lower() in ["true", "1", "yes"]:
+    """调试日志"""
+    if DEBUG_MODE:
         log(msg, "DEBUG")
 
 
@@ -247,6 +246,7 @@ def safe_b64decode(data):
     except Exception as e:
         debug_log(f"Base64解码失败: {e} - 数据: {data[:50]}...")
         return None
+
 
 def extract_ip_port_from_url(url):
     """从URL中提取IP和端口"""
@@ -321,7 +321,7 @@ def parse_node_link(line):
         # Shadowsocks 格式
         elif line.startswith("ss://"):
             # ss://base64(method:password@host:port)
-            parts = line[5:].split('@')
+            parts = line[5:].split('@', 1)
             if len(parts) == 2:
                 server_part = parts[1].split('#')[0].split('?')[0]
                 if ':' in server_part:
@@ -358,14 +358,13 @@ def fetch_proxyip_backend(domain, max_retries=3):
                 CHECK_API,
                 params={"target": domain},
                 headers=HEADERS,
-                timeout=30,
-                verify=True
+                timeout=30
             )
             
             # 检查HTTP状态码
             if resp.status_code != 200:
                 log(f"❌ API返回状态码: {resp.status_code}", "ERROR")
-                log(f"响应内容: {resp.text[:200]}...", "DEBUG")
+                debug_log(f"响应内容: {resp.text[:200]}...")
                 time.sleep(2)
                 continue
             
@@ -375,9 +374,8 @@ def fetch_proxyip_backend(domain, max_retries=3):
             # 智能解析不同格式的响应
             targets = []
             
-            # 情况1: 标准格式 { "data": [...], "code": 0 }
             if isinstance(data, dict):
-                if data.get("code") == 0 or data.get("code") == 200:
+                if data.get("code") in [0, 200, 20000]:
                     if "data" in data and isinstance(data["data"], list):
                         targets = data["data"]
                     elif "results" in data and isinstance(data["results"], list):
@@ -387,16 +385,14 @@ def fetch_proxyip_backend(domain, max_retries=3):
                     elif "nodes" in data and isinstance(data["nodes"], list):
                         targets = data["nodes"]
                 else:
-                    log(f"❌ API返回错误码: {data.get('code')}, 消息: {data.get('msg', '未知错误')}", "ERROR")
-            
-            # 情况2: 直接返回列表
+                    msg = data.get("msg", data.get("message", "未知错误"))
+                    log(f"❌ API返回错误码: {data.get('code')}, 消息: {msg}", "ERROR")
             elif isinstance(data, list):
                 targets = data
             
-            # 情况3: 嵌套格式
-            else:
-                # 尝试查找包含节点信息的字段
-                for key in ["data", "results", "targets", "nodes", "items", "list"]:
+            # 尝试查找包含节点信息的字段
+            if not targets:
+                for key in ["data", "results", "targets", "nodes", "items", "list", "proxies"]:
                     if key in data and isinstance(data[key], list):
                         targets = data[key]
                         break
@@ -408,14 +404,15 @@ def fetch_proxyip_backend(domain, max_retries=3):
                 continue
             
             # 处理节点
+            valid_count = 0
             for item in targets:
                 try:
                     if not isinstance(item, dict):
                         continue
                     
-                    # 获取IP，尝试多种字段名
+                    # 获取IP
                     ip = None
-                    for field in ["ip", "address", "host", "server"]:
+                    for field in ["ip", "address", "host", "server", "hostname"]:
                         if field in item and item[field]:
                             ip = str(item[field]).strip()
                             break
@@ -429,7 +426,7 @@ def fetch_proxyip_backend(domain, max_retries=3):
                     
                     # 获取端口
                     port = "443"
-                    for field in ["port", "server_port"]:
+                    for field in ["port", "server_port", "local_port"]:
                         if field in item and item[field]:
                             try:
                                 port = str(int(item[field]))
@@ -439,14 +436,12 @@ def fetch_proxyip_backend(domain, max_retries=3):
                     
                     # 获取地区
                     region = ""
-                    for field in ["country", "region", "location", "geo"]:
+                    for field in ["country", "region", "location", "geo", "country_code"]:
                         if field in item and item[field]:
-                            region = str(item[field]).strip().upper()
+                            region_val = str(item[field]).strip()
+                            # 只取前2个字符作为地区代码
+                            region = region_val[:2].upper()
                             break
-                    
-                    # 简化地区代码
-                    if region:
-                        region = region[:2]
                     
                     # 验证地区
                     if region not in ALLOWED_REGIONS:
@@ -458,10 +453,13 @@ def fetch_proxyip_backend(domain, max_retries=3):
                         continue
                     
                     results.add((ip, port, region))
+                    valid_count += 1
                     debug_log(f"✅ 找到节点: {ip}:{port} [{region}]")
                     
                 except Exception as e:
                     debug_log(f"处理节点时出错: {e}, 节点数据: {item}")
+            
+            debug_log(f"本次尝试找到 {valid_count} 个有效节点")
             
             if results:
                 log(f"✅ 成功获取 {len(results)} 个有效节点")
@@ -475,7 +473,7 @@ def fetch_proxyip_backend(domain, max_retries=3):
             time.sleep(3)
         except json.JSONDecodeError as e:
             log(f"❌ JSON解析失败: {e}", "ERROR")
-            log(f"响应内容: {resp.text[:200]}...", "DEBUG")
+            debug_log(f"响应内容: {resp.text[:200]}...")
             time.sleep(3)
         except Exception as e:
             log(f"❌ 未知错误: {e}", "ERROR")
@@ -526,12 +524,13 @@ def update_cloudflare_dns(region, ips):
             
             if response.status_code != 200:
                 log(f"❌ 获取记录失败: {response.status_code}", "ERROR")
-                log(f"响应: {response.text}", "DEBUG")
+                debug_log(f"响应: {response.text}")
                 return
             
             data = response.json()
             if not data.get("success"):
-                log(f"❌ Cloudflare API错误: {data.get('errors')}", "ERROR")
+                errors = data.get("errors", [])
+                log(f"❌ Cloudflare API错误: {errors}", "ERROR")
                 return
             
             records = data.get("result", [])
@@ -539,7 +538,8 @@ def update_cloudflare_dns(region, ips):
             
             # 检查是否还有更多页面
             result_info = data.get("result_info", {})
-            if page >= result_info.get("total_pages", 1):
+            total_pages = result_info.get("total_pages", 1)
+            if page >= total_pages:
                 break
             page += 1
         
@@ -560,6 +560,7 @@ def update_cloudflare_dns(region, ips):
                         log(f"   ✅ 删除记录 {record_id}")
                     else:
                         log(f"   ❌ 删除记录 {record_id} 失败: {del_resp.status_code}", "ERROR")
+                        debug_log(f"响应: {del_resp.text}")
                     time.sleep(0.5)  # 避免速率限制
         
         # 3. 添加新记录
@@ -586,7 +587,7 @@ def update_cloudflare_dns(region, ips):
                 log(f"   ✅ 添加记录: {ip}")
             else:
                 log(f"   ❌ 添加记录 {ip} 失败: {add_resp.status_code}", "ERROR")
-                log(f"   响应: {add_resp.text}", "DEBUG")
+                debug_log(f"响应: {add_resp.text}")
             
             time.sleep(1)  # 避免速率限制
         
@@ -594,11 +595,10 @@ def update_cloudflare_dns(region, ips):
         
     except Exception as e:
         log(f"❌ Cloudflare 更新失败: {e}", "ERROR")
-        import traceback
-        log(f"   堆栈跟踪: {traceback.format_exc()}", "DEBUG")
+        debug_log(f"堆栈跟踪: {traceback.format_exc()}")
 
 
-# ================= 主流程 =================
+# ================= 订阅解析 =================
 
 def fetch_subscription_nodes():
     """获取订阅源中的节点"""
@@ -612,8 +612,7 @@ def fetch_subscription_nodes():
             resp = requests.get(
                 sub_url,
                 headers=HEADERS,
-                timeout=30,
-                verify=True
+                timeout=30
             )
             
             if resp.status_code != 200:
@@ -642,31 +641,31 @@ def fetch_subscription_nodes():
                 parsed = parse_node_link(line)
                 if parsed:
                     host, port = parsed
-                    sub_result.add(f"{host}:{port}")
+                    node_str = f"{host}:{port}"
+                    sub_result.add(node_str)
                     valid_nodes += 1
             
             log(f"   ✅ 找到 {valid_nodes} 个有效节点")
             
         except Exception as e:
             log(f"❌ 订阅解析失败: {e}", "ERROR")
-            import traceback
-            log(f"   堆栈跟踪: {traceback.format_exc()}", "DEBUG")
+            debug_log(f"堆栈跟踪: {traceback.format_exc()}")
     
     return sub_result
 
 
-# ... [其余函数保持不变，为了简洁省略] ...
+# ================= 主流程 =================
 
 def main():
     """主函数"""
     start_time = time.time()
     
-    print("=" * 60)
-    print("🚀 ProxyIP 自动更新开始")
-    print(f"⏰ 开始时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 60)
+    print("=" * 60, flush=True)
+    print("🚀 ProxyIP 自动更新开始", flush=True)
+    print(f"⏰ 开始时间: {time.strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
+    print("=" * 60, flush=True)
     
-region_result = defaultdict(set)
+    region_result = defaultdict(set)
     
     # ================= 获取 ProxyIP =================
     total_nodes = 0
@@ -726,42 +725,50 @@ region_result = defaultdict(set)
     # ================= 保存结果 =================
     try:
         # 保存ProxyIP节点
-        with open("domain_ips.txt", "w", encoding="utf-8") as f:
-            f.write("\n".join(sorted(domain_output_lines)))
-        log(f"💾 已保存 {len(domain_output_lines)} 个ProxyIP节点到 domain_ips.txt")
+        if domain_output_lines:
+            with open("domain_ips.txt", "w", encoding="utf-8") as f:
+                f.write("\n".join(sorted(domain_output_lines)))
+            log(f"💾 已保存 {len(domain_output_lines)} 个ProxyIP节点到 domain_ips.txt")
         
         # 保存订阅节点
-        with open("other_ips.txt", "w", encoding="utf-8") as f:
-            f.write("\n".join(sorted(sub_result)))
-        log(f"💾 已保存 {len(sub_result)} 个订阅节点到 other_ips.txt")
+        if sub_result:
+            with open("other_ips.txt", "w", encoding="utf-8") as f:
+                f.write("\n".join(sorted(sub_result)))
+            log(f"💾 已保存 {len(sub_result)} 个订阅节点到 other_ips.txt")
         
     except Exception as e:
         log(f"❌ 保存文件失败: {e}", "ERROR")
+        debug_log(f"堆栈跟踪: {traceback.format_exc()}")
     
-    log("\n🎉 所有任务完成！")
-    
-    # 显示统计信息
-    log("\n📈 最终统计:")
-    for region, nodes in sorted(region_result.items()):
-        log(f"   {region}: {len(nodes)} 个节点")
-    log(f"   订阅节点: {len(sub_result)} 个")
-    
-    # 最后添加执行时间统计
+    # ================= 完成信息 =================
     end_time = time.time()
     duration = end_time - start_time
-    print(f"\n🎉 所有任务完成！")
-    print(f"⏱️  总耗时: {duration:.2f} 秒")
-    print("=" * 60)
+    
+    print("\n" + "=" * 60, flush=True)
+    print("🎉 所有任务完成！", flush=True)
+    print(f"⏱️  总耗时: {duration:.2f} 秒", flush=True)
+    print(f"📈 最终统计:", flush=True)
+    for region, nodes in sorted(region_result.items()):
+        print(f"   {region}: {len(nodes)} 个节点", flush=True)
+    print(f"   订阅节点: {len(sub_result)} 个", flush=True)
+    print("=" * 60, flush=True)
 
 
+# ================= 全局变量 =================
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
+}
+
+# ================= 执行入口 =================
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n🛑 程序被用户中断", file=sys.stderr)
+        print("\n🛑 程序被用户中断", file=sys.stderr, flush=True)
         sys.exit(1)
     except Exception as e:
-        print(f"\n❌ 严重错误: {e}", file=sys.stderr)
-        import traceback
-        print(f"堆栈跟踪: {traceback.format_exc()}", file=sys.stderr)
+        print(f"\n❌ 严重错误: {e}", file=sys.stderr, flush=True)
+        print(f"堆栈跟踪: {traceback.format_exc()}", file=sys.stderr, flush=True)
         sys.exit(1)

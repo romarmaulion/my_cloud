@@ -9,7 +9,7 @@ from collections import defaultdict
 # ================= 配置 =================
 
 # 主域名
-BASE_DOMAIN = os.getenv("BASE_DOMAIN")
+BASE_DOMAIN = os.getenv("CF_BASE_DOMAIN")
 
 # Cloudflare
 CF_API_TOKEN = os.getenv("CF_API_TOKEN")

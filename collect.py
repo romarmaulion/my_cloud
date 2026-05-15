@@ -3,34 +3,51 @@ import base64
 import json
 import os
 import random
+import time
 from collections import defaultdict
 
 # ================= 配置 =================
 
-# 你的主域名
+# 主域名
 BASE_DOMAIN = os.getenv("BASE_DOMAIN")
+
+# Cloudflare
+CF_API_TOKEN = os.getenv("CF_API_TOKEN")
+CF_ZONE_ID = os.getenv("CF_ZONE_ID")
 
 # ProxyIP 域名
 PROXYIP_DOMAINS = [
     "tw.william.us.ci",
-    "jp.cle.us.ci",
-    "sg.cle.us.ci",
+    "kr.william.us.ci",
+    "sjc.o00o.ooo",
     "ProxyIP.JP.CMLiussss.net",
-    "ProxyIP.KR.CMLiussss.net",
+    "ProxyIP.HK.CMLiussss.net",
+    "ProxyIP.SG.CMLiussss.net",
 ]
 
 # 订阅源
 SUB_SOURCES = [
     "https://sub.xinyitang.dpdns.org/sub?host=qq.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=/",
+    "https://sub.cmliussss.net/sub?host=qq.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=/",
+    "https://owo.o00o.ooo/sub?host=qq.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=/",
+    "https://cm.soso.edu.kg/sub?host=qq.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=/",
 ]
 
 # 每地区随机保留数量
 TOP_N = 5
 
 # 允许地区
-ALLOWED_REGIONS = {"HK", "JP", "SG", "KR", "TW", "US"}
+ALLOWED_REGIONS = {
+    "HK",
+    "JP",
+    "SG",
+    "KR",
+    "TW",
+    "US"
+}
 
-# 地区对应 IP 段
+# IP段过滤
+# 留空 = 不过滤
 ALLOWED_IP_PREFIX = {
     "HK": ["219."],
     "JP": [],
@@ -40,10 +57,8 @@ ALLOWED_IP_PREFIX = {
     "US": [],
 }
 
-CHECK_API = "https://api.090227.xyz/check"
-
-CF_API_TOKEN = os.getenv("CF_API_TOKEN")
-CF_ZONE_ID = os.getenv("CF_ZONE_ID")
+# ProxyIP API
+CHECK_API = "https://check.proxyip.cmliussss.net/api/check"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0"
@@ -56,11 +71,28 @@ def log(msg):
     print(msg, flush=True)
 
 
+def ip_match_region(ip, region):
+
+    prefixes = ALLOWED_IP_PREFIX.get(region)
+
+    # 留空 = 不过滤
+    if not prefixes:
+        return True
+
+    return any(
+        ip.startswith(p)
+        for p in prefixes
+    )
+
+
 def safe_b64decode(data):
+
     try:
+
         data = data.strip()
 
         padding = 4 - len(data) % 4
+
         if padding != 4:
             data += "=" * padding
 
@@ -84,6 +116,7 @@ def parse_node_link(line):
     if line.startswith("vmess://"):
 
         try:
+
             raw = line[8:]
 
             decoded = safe_b64decode(raw)
@@ -105,6 +138,7 @@ def parse_node_link(line):
     if "://" in line:
 
         try:
+
             body = line.split("#")[0]
 
             after = body.split("://", 1)[1]
@@ -128,85 +162,96 @@ def parse_node_link(line):
     return None
 
 
-def ip_match_region(ip, region):
-
-    prefixes = ALLOWED_IP_PREFIX.get(region)
-
-    # 留空则不过滤
-    if not prefixes:
-        return True
-
-    return any(ip.startswith(p) for p in prefixes)
-
+# ================= ProxyIP 核心 =================
 
 def fetch_proxyip_backend(domain):
 
-    try:
+    """
+    重复请求 API
+    获取多个真实后端节点
+    """
 
-        resp = requests.get(
-            CHECK_API,
-            params={"proxyip": domain},
-            headers=HEADERS,
-            timeout=20
-        )
+    results = set()
 
-        data = resp.json()
+    for _ in range(20):
 
-        results = []
+        try:
 
-        probe = data.get("probe_results", {})
-        ipv4 = probe.get("ipv4", {})
+            resp = requests.get(
+                CHECK_API,
+                params={
+                    "target": domain
+                },
+                headers=HEADERS,
+                timeout=20
+            )
 
-        exits = ipv4.get("exits", [])
+            data = resp.json()
 
-        # 多出口
-        if exits:
+            # 兼容不同返回格式
+            targets = []
 
-            for item in exits:
+            if isinstance(data, dict):
+
+                # 新版
+                if "results" in data:
+                    targets = data["results"]
+
+                elif "data" in data:
+                    targets = data["data"]
+
+                elif "targets" in data:
+                    targets = data["targets"]
+
+            elif isinstance(data, list):
+
+                targets = data
+
+            for item in targets:
+
+                if not isinstance(item, dict):
+                    continue
 
                 ip = item.get("ip")
                 port = str(item.get("port", "443"))
-                region = item.get("country", "").upper()
 
-                if (
-                    ip
-                    and region in ALLOWED_REGIONS
-                    and ip_match_region(ip, region)
-                ):
-                    results.append((ip, port, region))
+                region = (
+                    item.get("country")
+                    or item.get("region")
+                    or ""
+                ).upper()
 
-        # 单出口兼容
-        else:
+                if not ip:
+                    continue
 
-            exit_info = ipv4.get("exit", {})
+                if region not in ALLOWED_REGIONS:
+                    continue
 
-            ip = exit_info.get("ip")
-            port = str(exit_info.get("port", "443"))
-            region = exit_info.get("country", "").upper()
+                if not ip_match_region(ip, region):
+                    continue
 
-            if (
-                ip
-                and region in ALLOWED_REGIONS
-                and ip_match_region(ip, region)
-            ):
-                results.append((ip, port, region))
+                results.add(
+                    (ip, port, region)
+                )
 
-        return results
+        except:
+            pass
 
-    except Exception as e:
+        time.sleep(0.3)
 
-        log(f"[!] {domain} 获取失败: {e}")
+    return list(results)
 
-        return []
 
+# ================= Cloudflare =================
 
 def update_cloudflare_dns(region, ips):
 
     if not ips:
         return
 
-    # 自动生成 hk.xxx.com
-    record_name = f"{region.lower()}.{BASE_DOMAIN}"
+    record_name = (
+        f"{region.lower()}.{BASE_DOMAIN}"
+    )
 
     headers = {
         "Authorization": f"Bearer {CF_API_TOKEN}",
@@ -218,7 +263,7 @@ def update_cloudflare_dns(region, ips):
         f"zones/{CF_ZONE_ID}/dns_records"
     )
 
-    log(f"[CF] 更新 {record_name}")
+    log(f"\n[CF] 更新 {record_name}")
 
     try:
 
@@ -275,7 +320,7 @@ def main():
 
     region_result = defaultdict(set)
 
-    # ================= 获取 ProxyIP 后端 =================
+    # ================= 获取 ProxyIP =================
 
     for domain in PROXYIP_DOMAINS:
 
@@ -283,30 +328,50 @@ def main():
 
         results = fetch_proxyip_backend(domain)
 
+        if not results:
+
+            log("   -> 无结果")
+
+            continue
+
         for ip, port, region in results:
 
-            log(f"   -> {ip}:{port} [{region}]")
+            log(
+                f"   -> {ip}:{port} [{region}]"
+            )
 
-            region_result[region].add(ip)
+            # 保存 IP:PORT
+            region_result[region].add(
+                (ip, port)
+            )
 
-    # ================= 更新 Cloudflare =================
+    # ================= 更新 DNS =================
 
     domain_output_lines = []
 
     for region in sorted(region_result.keys()):
 
-        ips = list(region_result[region])
+        items = list(region_result[region])
 
-        random.shuffle(ips)
+        random.shuffle(items)
 
-        selected = ips[:TOP_N]
+        selected = items[:TOP_N]
 
-        update_cloudflare_dns(region, selected)
+        # DNS只能保存IP
+        unique_ips = list(set(
+            ip for ip, port in selected
+        ))
 
-        for ip in selected:
+        update_cloudflare_dns(
+            region,
+            unique_ips
+        )
+
+        # 文件保存 IP:PORT
+        for ip, port in selected:
 
             domain_output_lines.append(
-                f"{ip}#{region}"
+                f"{ip}:{port}#{region}"
             )
 
     # ================= 解析订阅 =================
@@ -314,6 +379,8 @@ def main():
     sub_result = set()
 
     for sub in SUB_SOURCES:
+
+        log(f"\n📥 订阅解析")
 
         try:
 
@@ -346,18 +413,27 @@ def main():
                     f"{host}:{port}"
                 )
 
-        except:
-            pass
+        except Exception as e:
 
-    # ================= 保存文件 =================
+            log(f"[!] 订阅失败: {e}")
 
-    with open("domain_ips.txt", "w", encoding="utf-8") as f:
+    # ================= 保存 =================
+
+    with open(
+        "domain_ips.txt",
+        "w",
+        encoding="utf-8"
+    ) as f:
 
         f.write(
-            "\n".join(domain_output_lines)
+            "\n".join(sorted(domain_output_lines))
         )
 
-    with open("other_ips.txt", "w", encoding="utf-8") as f:
+    with open(
+        "other_ips.txt",
+        "w",
+        encoding="utf-8"
+    ) as f:
 
         f.write(
             "\n".join(sorted(sub_result))

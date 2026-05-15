@@ -7,80 +7,153 @@ import time
 from collections import defaultdict
 import re
 from urllib.parse import urlparse, parse_qs
+import sys
 
-# ================= 配置验证 =================
-def validate_config():
-    """验证必要配置是否存在"""
-    required_vars = {
-        "BASE_DOMAIN": os.getenv("BASE_DOMAIN"),
-        "CF_API_TOKEN": os.getenv("CF_API_TOKEN"),
-        "CF_ZONE_ID": os.getenv("CF_ZONE_ID")
-    }
+# ================= GitHub Actions 专用环境变量处理 =================
+def get_github_env_var(var_name, required=False, default=None):
+    """
+    专门处理GitHub Actions环境变量
+    支持多种获取方式，解决GitHub Actions环境变量问题
+    """
+    # 调试：打印所有环境变量（仅在DEBUG模式下）
+    if os.environ.get('DEBUG_ENV', 'false').lower() in ['true', '1', 'yes']:
+        print("🔍 所有可用环境变量（调试模式）:")
+        for key in sorted(os.environ.keys()):
+            if any(x in key.lower() for x in ['cf_', 'base_', 'token', 'zone', 'secret', 'input']):
+                value_preview = os.environ[key][:50] + '...' if len(os.environ[key]) > 50 else os.environ[key]
+                print(f"   {key} = {value_preview}")
+        print("-" * 60)
     
-    missing = [var for var, value in required_vars.items() if not value]
-    if missing:
-        raise ValueError(f"缺少必要环境变量: {', '.join(missing)}")
+    # 方法1: 直接从环境变量获取（优先）
+    value = os.environ.get(var_name)
+    if value and value.strip():
+        return value.strip()
     
-    return required_vars
+    # 方法2: 尝试从GitHub Secrets格式获取
+    secrets_var_name = f"SECRETS_{var_name}"
+    value = os.environ.get(secrets_var_name)
+    if value and value.strip():
+        return value.strip()
+    
+    # 方法3: 尝试从INPUT_前缀获取（适用于action输入）
+    input_var_name = f"INPUT_{var_name.upper()}"
+    value = os.environ.get(input_var_name)
+    if value and value.strip():
+        return value.strip()
+    
+    # 方法4: 尝试常见变体
+    common_variants = [
+        var_name.upper(),
+        var_name.lower(),
+        f"GITHUB_SECRET_{var_name.upper()}",
+        f"ACTIONS_SECRET_{var_name.upper()}",
+        f"CF_{var_name.upper()}"
+    ]
+    
+    for variant in common_variants:
+        value = os.environ.get(variant)
+        if value and value.strip():
+            return value.strip()
+    
+    # 如果是必需的变量且没有找到，显示详细错误
+    if required:
+        error_msg = f"❌ 缺少必需的环境变量: {var_name}"
+        print(f"::error::{error_msg}", flush=True)  # GitHub Actions error annotation
+        
+        # 提供详细的设置指导
+        setup_guide = f"""
+::group::🔧 如何正确设置环境变量
+在GitHub仓库中设置环境变量的步骤：
+
+1. 访问仓库设置: {os.environ.get('GITHUB_REPOSITORY', 'your-repo')}/settings
+2. 左侧菜单选择 "Secrets and variables" > "Actions"
+3. 点击 "New repository secret" 按钮
+4. 按以下名称设置变量:
+
+   🔑 变量名称                  🔑 值
+   ──────────────────────────────────────────────────────────────
+   BASE_DOMAIN        = 你的域名（例如：example.com）
+   CF_API_TOKEN       = Cloudflare API Token
+   CF_ZONE_ID         = Cloudflare Zone ID
+
+5. 保存后重新运行Action
+
+注意: 
+- 变量名称必须完全匹配（区分大小写）
+- API Token需要有DNS编辑权限
+- 不要包含空格或特殊字符
+::endgroup::
+        """
+        print(setup_guide, flush=True)
+        
+        # 显示当前找到的相关环境变量
+        print("\n🔍 当前找到的相关环境变量:")
+        found_any = False
+        for key in sorted(os.environ.keys()):
+            if any(x in key.lower() for x in ['cf_', 'base_', 'token', 'zone', 'domain']):
+                found_any = True
+                value_preview = os.environ[key][:30] + '...' if len(os.environ[key]) > 30 else os.environ[key]
+                print(f"   ✅ {key} = {value_preview}")
+        
+        if not found_any:
+            print("   ❌ 未找到任何相关的环境变量")
+        
+        sys.exit(1)
+    
+    return default
+
 
 # ================= 配置 =================
-try:
-    config = validate_config()
-    BASE_DOMAIN = config["CF_BASE_DOMAIN"]
-    CF_API_TOKEN = config["CF_API_TOKEN"]
-    CF_ZONE_ID = config["CF_ZONE_ID"]
-except ValueError as e:
-    print(f"❌ 配置错误: {e}")
-    print("请设置以下环境变量:")
-    print("  - BASE_DOMAIN: 您的主域名")
-    print("  - CF_API_TOKEN: Cloudflare API Token")
-    print("  - CF_ZONE_ID: Cloudflare Zone ID")
-    exit(1)
+def load_config():
+    """加载配置，专门处理GitHub Actions环境"""
+    print("🚀 开始加载配置...")
+    
+    # 获取必需的环境变量
+    BASE_DOMAIN = get_github_env_var("BASE_DOMAIN", required=True)
+    CF_API_TOKEN = get_github_env_var("CF_API_TOKEN", required=True)
+    CF_ZONE_ID = get_github_env_var("CF_ZONE_ID", required=True)
+    
+    print(f"✅ 配置加载成功:")
+    print(f"   🌐 BASE_DOMAIN: {BASE_DOMAIN}")
+    print(f"   🔑 CF_API_TOKEN: {'*' * (len(CF_API_TOKEN) - 4) + CF_API_TOKEN[-4:] if CF_API_TOKEN else '未设置'}")
+    print(f"   🆔 CF_ZONE_ID: {CF_ZONE_ID[:8]}...")
+    
+    return {
+        "BASE_DOMAIN": BASE_DOMAIN,
+        "CF_API_TOKEN": CF_API_TOKEN,
+        "CF_ZONE_ID": CF_ZONE_ID
+    }
+
+# 加载配置
+CONFIG = load_config()
+BASE_DOMAIN = CONFIG["BASE_DOMAIN"]
+CF_API_TOKEN = CONFIG["CF_API_TOKEN"]
+CF_ZONE_ID = CONFIG["CF_ZONE_ID"]
 
 # ProxyIP 域名
 PROXYIP_DOMAINS = [
     "tw.william.us.ci",
-    "tw.william.us.ci",
-    "ProxyIP.SG.CMLiussss.net",
+    "jp.cle.us.ci",
+    "sg.cle.us.ci",
     "ProxyIP.JP.CMLiussss.net",
-    "ProxyIP.HK.CMLiussss.net",
-    "sjc.o00o.ooo",
+    "ProxyIP.KR.CMLiussss.net",
 ]
 
-# 订阅源
-SUB_SOURCES = [
+# 订阅源 - 从环境变量获取，支持多行
+SUB_SOURCES_ENV = os.environ.get("SUB_SOURCES", "").strip()
+SUB_SOURCES = [url.strip() for url in SUB_SOURCES_ENV.splitlines() if url.strip()] or [
     "https://sub.xinyitang.dpdns.org/sub?host=qq.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=/",
-    "https://sub.cmliussss.net/sub?host=qq.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=/",
-    "https://owo.o00o.ooo/sub?host=qq.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=/",
-    "https://cm.soso.edu.kg/sub?host=qq.romarmaulion.ccwu.cc&uuid=d074c173-ab5e-4c1a-817f-819afbdf36b8&path=/",
 ]
 
 # 每地区随机保留数量
-TOP_N = 5
+TOP_N = int(os.environ.get("TOP_N", "5"))
 
-# 允许地区
-ALLOWED_REGIONS = {
-    "HK",
-    "JP",
-    "SG",
-    "KR",
-    "TW",
-    "US"
-}
-
-# IP段过滤
-# 留空 = 不过滤
-ALLOWED_IP_PREFIX = {
-    "HK": ["219."],
-    "JP": [],
-    "SG": [],
-    "KR": [],
-    "TW": [],
-    "US": [],
-}
+# 允许地区 - 从环境变量获取，支持逗号分隔
+ALLOWED_REGIONS_ENV = os.environ.get("ALLOWED_REGIONS", "HK,JP,SG,KR,TW,US").strip()
+ALLOWED_REGIONS = {region.strip().upper() for region in ALLOWED_REGIONS_ENV.split(",") if region.strip()}
 
 # ProxyIP API
-CHECK_API = "https://check.proxyip.cmliussss.net/api/check"
+CHECK_API = os.environ.get("CHECK_API", "https://check.proxyip.cmliussss.net/api/check")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
@@ -88,12 +161,40 @@ HEADERS = {
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
 }
 
+# IP段过滤配置（从环境变量获取）
+IP_PREFIXES = {}
+ip_prefixes_env = os.environ.get("IP_PREFIXES", "").strip()
+if ip_prefixes_env:
+    for line in ip_prefixes_env.splitlines():
+        if ":" in line:
+            region, prefixes = line.split(":", 1)
+            region = region.strip().upper()
+            prefix_list = [p.strip() for p in prefixes.split(",") if p.strip()]
+            if region and prefix_list:
+                IP_PREFIXES[region] = prefix_list
+
+print(f"📋 运行配置:")
+print(f"   🎯 ProxyIP域名数量: {len(PROXYIP_DOMAINS)}")
+print(f"   📡 订阅源数量: {len(SUB_SOURCES)}")
+print(f"   🌍 允许地区: {', '.join(sorted(ALLOWED_REGIONS))}")
+print(f"   📊 每地区保留: {TOP_N} 个节点")
+print(f"   🔍 IP前缀过滤: {'已配置' if IP_PREFIXES else '未配置'}")
+print("-" * 60)
+
 
 # ================= 工具函数 =================
 
 def log(msg, level="INFO"):
-    """增强日志功能，带时间戳和级别"""
+    """增强日志功能，适配GitHub Actions"""
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    
+    # GitHub Actions特殊日志格式
+    if level == "ERROR":
+        print(f"::error::{msg}", flush=True)
+    elif level == "WARNING":
+        print(f"::warning::{msg}", flush=True)
+    
+    # 标准输出
     level_color = {
         "INFO": "\033[32m",    # 绿色
         "WARNING": "\033[33m", # 黄色
@@ -106,14 +207,14 @@ def log(msg, level="INFO"):
 
 
 def debug_log(msg):
-    """调试日志"""
-    if os.getenv("DEBUG", "false").lower() in ["true", "1", "yes"]:
+    """调试日志，只在DEBUG模式下显示"""
+    if os.environ.get("DEBUG", "false").lower() in ["true", "1", "yes"]:
         log(msg, "DEBUG")
 
 
 def ip_match_region(ip, region):
     """检查IP是否符合地区前缀规则"""
-    prefixes = ALLOWED_IP_PREFIX.get(region, [])
+    prefixes = IP_PREFIXES.get(region, [])
     
     # 留空 = 不过滤
     if not prefixes:
@@ -146,7 +247,6 @@ def safe_b64decode(data):
     except Exception as e:
         debug_log(f"Base64解码失败: {e} - 数据: {data[:50]}...")
         return None
-
 
 def extract_ip_port_from_url(url):
     """从URL中提取IP和端口"""
@@ -555,18 +655,18 @@ def fetch_subscription_nodes():
     return sub_result
 
 
+# ... [其余函数保持不变，为了简洁省略] ...
+
 def main():
     """主函数"""
-    log("=" * 60)
-    log("🚀 ProxyIP 自动更新开始")
-    log(f"📋 配置信息:")
-    log(f"   - 基础域名: {BASE_DOMAIN}")
-    log(f"   - ProxyIP域名数量: {len(PROXYIP_DOMAINS)}")
-    log(f"   - 允许地区: {', '.join(sorted(ALLOWED_REGIONS))}")
-    log(f"   - 每地区保留: {TOP_N} 个节点")
-    log("=" * 60)
+    start_time = time.time()
     
-    region_result = defaultdict(set)
+    print("=" * 60)
+    print("🚀 ProxyIP 自动更新开始")
+    print(f"⏰ 开始时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 60)
+    
+region_result = defaultdict(set)
     
     # ================= 获取 ProxyIP =================
     total_nodes = 0
@@ -645,17 +745,23 @@ def main():
     for region, nodes in sorted(region_result.items()):
         log(f"   {region}: {len(nodes)} 个节点")
     log(f"   订阅节点: {len(sub_result)} 个")
+    
+    # 最后添加执行时间统计
+    end_time = time.time()
+    duration = end_time - start_time
+    print(f"\n🎉 所有任务完成！")
+    print(f"⏱️  总耗时: {duration:.2f} 秒")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
     try:
-        start_time = time.time()
         main()
-        end_time = time.time()
-        log(f"\n⏱️  总耗时: {end_time - start_time:.2f} 秒")
     except KeyboardInterrupt:
-        log("\n🛑 程序被用户中断", "WARNING")
+        print("\n🛑 程序被用户中断", file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
-        log(f"\n❌ 严重错误: {e}", "ERROR")
+        print(f"\n❌ 严重错误: {e}", file=sys.stderr)
         import traceback
-        log(f"堆栈跟踪: {traceback.format_exc()}", "DEBUG")
+        print(f"堆栈跟踪: {traceback.format_exc()}", file=sys.stderr)
+        sys.exit(1)

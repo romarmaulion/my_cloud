@@ -12,7 +12,7 @@ from urllib.parse import urlparse, parse_qs
 def validate_config():
     """验证必要配置是否存在"""
     required_vars = {
-        "BASE_DOMAIN": os.getenv("CF_BASE_DOMAIN"),
+        "BASE_DOMAIN": os.getenv("BASE_DOMAIN"),
         "CF_API_TOKEN": os.getenv("CF_API_TOKEN"),
         "CF_ZONE_ID": os.getenv("CF_ZONE_ID")
     }

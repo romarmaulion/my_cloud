@@ -37,7 +37,7 @@ REGION_FILTERS = {
 }
 
 ALLOWED_REGIONS = set(REGION_FILTERS.keys())
-TOP_N = 5
+TOP_N = 3
 CHECK_API = "https://api.090227.xyz/check"
 
 # Cloudflare 配置
@@ -174,7 +174,7 @@ def main():
         
         # 域名源: 筛选 -> 更新CF -> 存入列表
         d_pool = verified_pools[region]["DOMAIN"]
-        d_select = random.sample(d_pool, min(len(d_pool), 1))
+        d_select = random.sample(d_pool, min(len(d_pool), TOP_N))
         if d_select:
             update_cf_dns(region, [x[0] for x in d_select])
             for ip, port in d_select: domain_final.append(f"{ip}#{region}")

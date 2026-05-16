@@ -174,7 +174,7 @@ def main():
         
         # 域名源: 筛选 -> 更新CF -> 存入列表
         d_pool = verified_pools[region]["DOMAIN"]
-        d_select = random.sample(d_pool, min(len(d_pool), TOP_N))
+        d_select = random.sample(d_pool, min(len(d_pool), 1))
         if d_select:
             update_cf_dns(region, [x[0] for x in d_select])
             for ip, port in d_select: domain_final.append(f"{ip}#{region}")

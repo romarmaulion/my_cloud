@@ -65,7 +65,7 @@ class HostingChecker:
     def _check_ip_api(self, ip):
         try:
             resp = requests.get(
-                f"http://ip-api.com/json/{ip}?fields=status,hosting,proxy,isp,org,country",
+                f"http://ip-api.com/json/{ip}?fields=status,hosting,proxy,isp",
                 timeout=5
             )
             if resp.status_code == 429:
@@ -94,7 +94,7 @@ class HostingChecker:
             if data.get("error"):
                 return None
             org = data.get("org", "").lower()
-            hosting_keywords = [
+            kw = [
                 "cloudflare", "amazon", "google", "microsoft",
                 "digitalocean", "vultr", "linode", "ovh",
                 "hetzner", "bandwagon", "choopa", "contabo",
@@ -102,9 +102,8 @@ class HostingChecker:
                 "alibaba", "tencent", "data center", "hosting",
                 "server", "cloud", "vps", "dedicated"
             ]
-            is_hosting = any(kw in org for kw in hosting_keywords)
             return {
-                "is_hosting": is_hosting,
+                "is_hosting": any(k in org for k in kw),
                 "isp": data.get("org", ""),
                 "source": "ipapi.co"
             }
@@ -124,18 +123,17 @@ class HostingChecker:
             data = resp.json()
             org = data.get("org", "").lower()
             hostname = data.get("hostname", "").lower()
-            hosting_keywords = [
+            kw = [
                 "cloudflare", "amazon", "google", "microsoft",
                 "digitalocean", "vultr", "linode", "ovh",
                 "hetzner", "bandwagon", "choopa", "contabo",
                 "hosting", "server", "cloud", "vps", "data center"
             ]
-            is_hosting = (
-                any(kw in org for kw in hosting_keywords) or
-                any(kw in hostname for kw in ["cloud", "server", "vps", "host", "node"])
-            )
             return {
-                "is_hosting": is_hosting,
+                "is_hosting": (
+                    any(k in org for k in kw) or
+                    any(k in hostname for k in ["cloud", "server", "vps", "host", "node"])
+                ),
                 "isp": data.get("org", ""),
                 "source": "ipinfo.io"
             }
@@ -145,28 +143,21 @@ class HostingChecker:
 
     def _check_ipwhois(self, ip):
         try:
-            resp = requests.get(
-                f"https://ipwhois.app/json/{ip}",
-                timeout=5
-            )
+            resp = requests.get(f"https://ipwhois.app/json/{ip}", timeout=5)
             if resp.status_code == 429:
                 return None
             data = resp.json()
             if data.get("success"):
                 isp = data.get("isp", "").lower()
-                connection_type = data.get("connection_type", "").lower()
-                hosting_keywords = [
+                ct = data.get("connection_type", "").lower()
+                kw = [
                     "cloudflare", "amazon", "google", "microsoft",
                     "digitalocean", "vultr", "linode", "ovh",
                     "hetzner", "bandwagon", "hosting", "cloud",
                     "server", "data center", "vps"
                 ]
-                is_hosting = (
-                    any(kw in isp for kw in hosting_keywords) or
-                    connection_type in ["dcn", "hosting"]
-                )
                 return {
-                    "is_hosting": is_hosting,
+                    "is_hosting": any(k in isp for k in kw) or ct in ["dcn", "hosting"],
                     "isp": data.get("isp", ""),
                     "source": "ipwhois.app"
                 }
@@ -176,21 +167,17 @@ class HostingChecker:
 
     def _check_ipdata(self, ip):
         try:
-            resp = requests.get(
-                f"https://api.ipdata.co/{ip}?api-key=test",
-                timeout=5
-            )
+            resp = requests.get(f"https://api.ipdata.co/{ip}?api-key=test", timeout=5)
             if resp.status_code == 429:
                 return None
             data = resp.json()
             threat = data.get("threat", {})
-            is_hosting = (
-                threat.get("is_datacenter", False) or
-                threat.get("is_proxy", False) or
-                threat.get("is_anonymous", False)
-            )
             return {
-                "is_hosting": is_hosting,
+                "is_hosting": (
+                    threat.get("is_datacenter", False) or
+                    threat.get("is_proxy", False) or
+                    threat.get("is_anonymous", False)
+                ),
                 "isp": data.get("asn", {}).get("name", ""),
                 "source": "ipdata.co"
             }
@@ -201,8 +188,8 @@ class HostingChecker:
     def check(self, ip):
         sources = self.sources.copy()
         random.shuffle(sources)
-        for source_func in sources:
-            result = source_func(ip)
+        for fn in sources:
+            result = fn(ip)
             if result is not None:
                 return result
         return None
@@ -229,19 +216,30 @@ def is_ip_in_allowed_subnets(ip, region):
 
 
 def resolve_domain(domain):
+    """解析域名，带重试"""
     ips = set()
-    try:
-        resolver = dns.resolver.Resolver()
-        resolver.nameservers = ["1.1.1.1", "8.8.8.8"]
-        resolver.timeout = 3
-        answers = resolver.resolve(domain, 'A')
-        for rdata in answers:
-            ips.add(rdata.address)
-    except Exception:
+    dns_servers = [
+        ["1.1.1.1", "1.0.0.1"],
+        ["8.8.8.8", "8.8.4.4"],
+        ["9.9.9.9"],
+    ]
+    for servers in dns_servers:
         try:
-            ips.add(socket.gethostbyname(domain))
+            resolver = dns.resolver.Resolver()
+            resolver.nameservers = servers
+            resolver.timeout = 3
+            resolver.lifetime = 5
+            answers = resolver.resolve(domain, 'A')
+            for rdata in answers:
+                ips.add(rdata.address)
+            if ips:
+                return ips
         except Exception:
-            pass
+            continue
+    try:
+        ips.add(socket.gethostbyname(domain))
+    except Exception:
+        pass
     return ips
 
 
@@ -273,32 +271,71 @@ def check_region(ip, port):
 
 
 def fetch_online_ips(url):
-    ips = set()
+    """
+    从网络文件下载IP列表
+    格式: IP:端口#地区 或 IP#地区 或 IP:端口
+    直接返回按地区分类好的字典: {region: [(ip, port), ...]}
+    """
+    region_ips = {r: [] for r in ALLOWED_REGIONS}
+    total = 0
+    
     try:
         log(f"   📥 下载: {url}")
         resp = requests.get(url, timeout=30)
         resp.raise_for_status()
+        
         for line in resp.text.strip().splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            parts = line.split(",")
-            first_col = parts[0].strip()
-            if ":" in first_col:
-                ip_part, port_part = first_col.rsplit(":", 1)
+            
+            # 解析格式: IP:端口#地区
+            region = None
+            ip_part = line
+            port_part = "443"
+            
+            # 提取地区标记
+            if "#" in line:
+                ip_part, region_tag = line.rsplit("#", 1)
+                region_tag = region_tag.strip().upper()
+                if region_tag in ALLOWED_REGIONS:
+                    region = region_tag
+            
+            # 提取端口
+            if ":" in ip_part:
+                ip_part, port_part = ip_part.rsplit(":", 1)
+                # 清理端口号
+                port_part = re.sub(r'[^0-9]', '', port_part)
+                if not port_part:
+                    port_part = "443"
+            
+            # 验证IP
+            ip_part = ip_part.strip()
+            if not re.match(r"^\d+\.\d+\.\d+\.\d+$", ip_part):
+                continue
+            try:
+                ipaddress.ip_address(ip_part)
+            except ValueError:
+                continue
+            
+            # 如果有地区标记，直接归类
+            if region:
+                region_ips[region].append((ip_part, port_part))
+                total += 1
             else:
-                ip_part = first_col
-                port_part = "443"
-            if re.match(r"^\d+\.\d+\.\d+\.\d+$", ip_part):
-                try:
-                    ipaddress.ip_address(ip_part)
-                    ips.add((ip_part, port_part))
-                except ValueError:
-                    pass
-        log(f"   ✅ 获取到 {len(ips)} 个IP")
+                # 没有地区标记，先收集起来，后面再检测
+                region_ips["UNKNOWN"].append((ip_part, port_part))
+                total += 1
+        
+        for r in ALLOWED_REGIONS:
+            log(f"      {r}: {len(region_ips[r])} 个")
+        if "UNKNOWN" in region_ips and region_ips["UNKNOWN"]:
+            log(f"      未标记地区: {len(region_ips['UNKNOWN'])} 个（将走地区验证）")
+            
     except Exception as e:
         log(f"   ❌ 下载失败: {e}")
-    return ips
+    
+    return region_ips, total
 
 
 def update_cf_dns(region, ips):
@@ -362,24 +399,22 @@ def batch_check_hosting(ip_port_region_list):
         log(f"   🔄 第二轮: 多源轮询剩余 {len(remaining)} 个...")
         checker = HostingChecker()
 
-        def check_remaining(ip):
+        def check_one(ip):
             return ip, checker.check(ip)
 
         with ThreadPoolExecutor(max_workers=HOSTING_CHECK_WORKERS) as executor:
-            futures = {executor.submit(check_remaining, ip): ip for ip in remaining}
-            done_count = 0
+            futures = {executor.submit(check_one, ip): ip for ip in remaining}
+            done = 0
             for future in as_completed(futures):
-                done_count += 1
+                done += 1
                 ip, result = future.result()
                 if result:
                     batch_results[ip] = result
-                if done_count % 20 == 0 or done_count == len(remaining):
-                    log(f"      多源轮询进度: [{done_count}/{len(remaining)}]")
+                if done % 20 == 0 or done == len(remaining):
+                    log(f"      多源轮询进度: [{done}/{len(remaining)}]")
 
     # 归类
-    non_hosting = []
-    hosting = []
-    failed = []
+    non_hosting, hosting, failed = [], [], []
     for ip, port, region in ip_port_region_list:
         result = batch_results.get(ip)
         if result is None:
@@ -389,8 +424,68 @@ def batch_check_hosting(ip_port_region_list):
         else:
             non_hosting.append((ip, port, region))
 
-    log(f"\n   ✅ 机房IP检测完成: 非机房={len(non_hosting)} | 机房={len(hosting)} | 失败={len(failed)}")
+    log(f"\n   ✅ 检测完成: 非机房={len(non_hosting)} | 机房={len(hosting)} | 失败={len(failed)}")
     return non_hosting, hosting, failed
+
+
+# ================= 订阅链接解析 =================
+
+def parse_sub_content(content):
+    """解析订阅内容，提取所有 IP:端口"""
+    results = []
+
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+
+        # vmess://
+        if line.startswith("vmess://"):
+            try:
+                raw = line[8:].split("#")[0]
+                decoded = safe_b64decode(raw)
+                if decoded:
+                    j = json.loads(decoded)
+                    host = j.get("add", "")
+                    port = str(j.get("port", "443"))
+                    if host and port:
+                        if re.match(r"^\d+\.\d+\.\d+\.\d+$", host):
+                            results.append((host, port))
+                        else:
+                            for ip in resolve_domain(host):
+                                results.append((ip, port))
+            except Exception:
+                pass
+            continue
+
+        # 标准 URI 格式
+        if "://" in line:
+            try:
+                body = line.split("#")[0]
+                after_proto = body.split("://", 1)[1]
+                if "@" in after_proto:
+                    after_proto = after_proto.rsplit("@", 1)[1]
+                host_port = after_proto.split("/")[0].split("?")[0]
+                if host_port.startswith("["):
+                    continue
+                if ":" in host_port:
+                    h, p = host_port.rsplit(":", 1)
+                else:
+                    h, p = host_port, "443"
+                p = re.sub(r'[^0-9]', '', p)
+                if not p:
+                    p = "443"
+                if re.match(r"^\d+\.\d+\.\d+\.\d+$", h):
+                    results.append((h, p))
+                else:
+                    resolved = resolve_domain(h)
+                    if resolved:
+                        for ip in resolved:
+                            results.append((ip, p))
+            except Exception:
+                pass
+
+    return results
 
 
 # ================= 主程序 =================
@@ -406,122 +501,142 @@ def main():
     log(f"   域名源每地区: {DOMAIN_TOP_N} 个（非机房）")
     log(f"   订阅+网络每地区: {FINAL_TOP_N} 个（非机房）")
 
-    raw_candidates = set()
+    # 分开收集三种来源
+    domain_candidates = []   # [(ip, port)]
+    sub_candidates = []      # [(ip, port)]
+    online_region_ips = {r: [] for r in ALLOWED_REGIONS}  # 网络文件直接按地区分好
+    online_unknown = []      # 网络文件中未标记地区的IP
 
     # ===== 阶段1: 提取IP =====
     log("\n" + "=" * 55)
     log("📡 阶段1: 从各源提取IP")
     log("=" * 55)
 
+    # 1a. 域名源
     for src, typ in SOURCES:
         if typ == "DOMAIN":
             resolved = resolve_domain(src)
             for ip in resolved:
-                raw_candidates.add((ip, "443", "DOMAIN"))
+                domain_candidates.append((ip, "443"))
             log(f"   [域名] {src} -> {len(resolved)} 个IP")
-        else:
+
+    # 1b. 订阅源
+    for src, typ in SOURCES:
+        if typ == "SUB":
             try:
                 resp = requests.get(src, timeout=15)
+                resp.raise_for_status()
                 content = safe_b64decode(resp.text) or resp.text
-                count = 0
-                for line in content.splitlines():
-                    if "://" in line:
-                        body = line.split("#")[0]
-                        after_proto = body.split("://", 1)[1]
-                        if "@" in after_proto:
-                            after_proto = after_proto.rsplit("@", 1)[1]
-                        host_port = after_proto.split("/")[0].split("?")[0]
-                        if ":" in host_port:
-                            h, p = host_port.split(":", 1)
-                        else:
-                            h, p = host_port, "443"
-                        if re.match(r"^\d+\.\d+\.\d+\.\d+$", h):
-                            raw_candidates.add((h, p, "SUB"))
-                            count += 1
-                        else:
-                            for ip in resolve_domain(h):
-                                raw_candidates.add((ip, p, "SUB"))
-                                count += 1
-                log(f"   [订阅] {src[:55]}... -> {count} 个IP")
+                parsed = parse_sub_content(content)
+                sub_candidates.extend(parsed)
+                log(f"   [订阅] {src[:55]}... -> {len(parsed)} 个IP")
             except Exception as e:
                 log(f"   [订阅] {src[:55]}... -> 失败: {e}")
 
+    # 1c. 网络文件源
     log(f"\n   --- 网络文件源 ---")
     for url in ONLINE_IP_FILES:
-        online_ips = fetch_online_ips(url)
-        for ip, port in online_ips:
-            raw_candidates.add((ip, port, "ONLINE"))
+        region_ips, total = fetch_online_ips(url)
+        for r in ALLOWED_REGIONS:
+            online_region_ips[r].extend(region_ips.get(r, []))
+        online_unknown.extend(region_ips.get("UNKNOWN", []))
 
-    log(f"\n📊 提取完成，共 {len(raw_candidates)} 个IP")
+    # 去重（每个来源内部）
+    domain_candidates = list(set(domain_candidates))
+    sub_candidates = list(set(sub_candidates))
+    for r in ALLOWED_REGIONS:
+        online_region_ips[r] = list(set(online_region_ips[r]))
+    online_unknown = list(set(online_unknown))
 
-    # ===== 阶段2: 地区验证 =====
+    total_online = sum(len(online_region_ips[r]) for r in ALLOWED_REGIONS)
+    log(f"\n📊 提取完成:")
+    log(f"   域名源:    {len(domain_candidates)} 个IP")
+    log(f"   订阅源:    {len(sub_candidates)} 个IP")
+    log(f"   网络文件:  {total_online} 个已标记地区 + {len(online_unknown)} 个未标记")
+
+    # ===== 阶段2: 地区验证（只对域名源、订阅源、网络文件未标记地区） =====
     log("\n" + "=" * 55)
-    log("🌍 阶段2: 地区验证")
+    log("🌍 阶段2: 地区验证（域名源+订阅源+网络文件未标记IP）")
     log("=" * 55)
 
     verified_pools = {r: {"DOMAIN": [], "SUB": [], "ONLINE": []} for r in ALLOWED_REGIONS}
-    checked = 0
-    total_raw = len(raw_candidates)
 
-    def process_region(ip, port, source_type):
-        region = check_region(ip, port)
-        if region in ALLOWED_REGIONS:
-            if source_type == "DOMAIN":
-                if is_ip_in_allowed_subnets(ip, region):
+    # 网络文件已标记的地区直接归类
+    for r in ALLOWED_REGIONS:
+        for ip, port in online_region_ips[r]:
+            verified_pools[r]["ONLINE"].append((ip, port))
+
+    # 构建需要地区验证的列表
+    to_verify = []
+    for ip, port in domain_candidates:
+        to_verify.append((ip, port, "DOMAIN"))
+    for ip, port in sub_candidates:
+        to_verify.append((ip, port, "SUB"))
+    for ip, port in online_unknown:
+        to_verify.append((ip, port, "ONLINE"))
+
+    to_verify = list(set(to_verify))
+    total_verify = len(to_verify)
+
+    if to_verify:
+        def process_region(ip, port, source_type):
+            region = check_region(ip, port)
+            if region in ALLOWED_REGIONS:
+                if source_type == "DOMAIN":
+                    if is_ip_in_allowed_subnets(ip, region):
+                        return region, ip, port, source_type
+                else:
                     return region, ip, port, source_type
-            else:
-                return region, ip, port, source_type
-        return None
+            return None
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {
-            executor.submit(process_region, ip, port, st): (ip, port, st)
-            for ip, port, st in raw_candidates
-        }
-        for f in as_completed(futures):
-            checked += 1
-            res = f.result()
-            if res:
-                region, ip, port, st = res
-                verified_pools[region][st].append((ip, port))
-            if checked % 50 == 0 or checked == total_raw:
-                log(f"   地区验证进度: [{checked}/{total_raw}]")
+        checked = 0
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {
+                executor.submit(process_region, ip, port, st): (ip, port, st)
+                for ip, port, st in to_verify
+            }
+            for f in as_completed(futures):
+                checked += 1
+                res = f.result()
+                if res:
+                    region, ip, port, st = res
+                    verified_pools[region][st].append((ip, port))
+                if checked % 50 == 0 or checked == total_verify:
+                    log(f"   地区验证进度: [{checked}/{total_verify}]")
+    else:
+        log(f"   无需地区验证（所有IP已有地区标记）")
 
-    log(f"\n   地区验证结果:")
+    log(f"\n   各地区结果:")
     for region in sorted(ALLOWED_REGIONS):
         pool = verified_pools[region]
         log(f"   {region}: 域名={len(pool['DOMAIN'])}, 订阅={len(pool['SUB'])}, 网络文件={len(pool['ONLINE'])}")
 
-    # ===== 阶段3: 所有源统一做机房IP筛选 =====
+    # ===== 阶段3: 机房IP筛选 =====
     log("\n" + "=" * 55)
     log("🏢 阶段3: 机房IP筛选（所有源）")
     log("=" * 55)
 
-    # 把三种源全部合并，统一做机房检测
-    all_for_hosting_check = []
+    # 合并所有待检测IP
+    all_for_hosting = []
     for region in ALLOWED_REGIONS:
         for ip, port in verified_pools[region]["DOMAIN"]:
-            all_for_hosting_check.append((ip, port, region, "DOMAIN"))
+            all_for_hosting.append((ip, port, region, "DOMAIN"))
         for ip, port in verified_pools[region]["SUB"]:
-            all_for_hosting_check.append((ip, port, region, "SUB"))
+            all_for_hosting.append((ip, port, region, "SUB"))
         for ip, port in verified_pools[region]["ONLINE"]:
-            all_for_hosting_check.append((ip, port, region, "ONLINE"))
+            all_for_hosting.append((ip, port, region, "ONLINE"))
 
-    # 去重（基于ip+port+region）
-    all_for_hosting_check = list(set(all_for_hosting_check))
+    # 去重（基于IP+端口+来源+地区）
+    all_for_hosting = list(set(all_for_hosting))
 
-    if all_for_hosting_check:
-        # batch_check_hosting 只接收 (ip, port, region)
-        # 需要保留 source_type 信息，所以这里手动处理
-        check_list = [(ip, port, region) for ip, port, region, st in all_for_hosting_check]
+    if all_for_hosting:
+        check_list = [(ip, port, region) for ip, port, region, st in all_for_hosting]
         non_hosting_raw, hosting_raw, failed_raw = batch_check_hosting(check_list)
 
-        # 把非机房IP的 source_type 信息补回来
         non_hosting_set = set((ip, port, region) for ip, port, region in non_hosting_raw)
 
-        # 按地区和来源归类非机房IP
         non_hosting_pools = {r: {"DOMAIN": [], "SUB": [], "ONLINE": []} for r in ALLOWED_REGIONS}
-        for ip, port, region, st in all_for_hosting_check:
+        for ip, port, region, st in all_for_hosting:
             if (ip, port, region) in non_hosting_set:
                 non_hosting_pools[region][st].append((ip, port))
 
@@ -544,7 +659,7 @@ def main():
     for region in sorted(ALLOWED_REGIONS):
         log(f"\n🌍 地区: {region}")
 
-        # 域名源: 从非机房池中抽取 DOMAIN_TOP_N 个
+        # 域名源: 非机房池中随机抽取
         d_pool = non_hosting_pools[region]["DOMAIN"]
         d_select = random.sample(d_pool, min(len(d_pool), DOMAIN_TOP_N))
         if d_select:
@@ -555,10 +670,11 @@ def main():
         else:
             log(f"   [域名源] 无可用非机房IP")
 
-        # 订阅源+网络文件源: 合并后从非机房池中抽取 FINAL_TOP_N 个
-        o_pool = non_hosting_pools[region]["SUB"] + non_hosting_pools[region]["ONLINE"]
-        # 去重
-        o_pool = list(set(o_pool))
+        # 订阅源+网络文件源: 合并后去重，再从非机房池随机抽取
+        o_pool = list(set(
+            non_hosting_pools[region]["SUB"] +
+            non_hosting_pools[region]["ONLINE"]
+        ))
         o_select = random.sample(o_pool, min(len(o_pool), FINAL_TOP_N))
         if o_select:
             for ip, port in o_select:

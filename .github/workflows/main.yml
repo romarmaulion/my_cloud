@@ -2,7 +2,7 @@ name: Auto IP Optimization
 
 on:
   schedule:
-    - cron: '14 2,7 * * *'
+    - cron: '34 3 * * *'
   workflow_dispatch:
 
 jobs:
